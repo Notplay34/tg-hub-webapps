@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Картотека</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Список людей -->
+        <div class="screen" id="listScreen">
+            <header class="header">
+                <h1>Картотека</h1>
+                <button class="btn-add" id="btnAddPerson">+</button>
+            </header>
+            
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="Поиск...">
+            </div>
+            
+            <div class="groups-filter" id="groupsFilter">
+                <button class="group-tag active" data-group="all">Все</button>
+            </div>
+            
+            <main class="people-list" id="peopleList"></main>
+            
+            <div class="empty" id="emptyState">
+                <p>Картотека пуста</p>
+                <p class="hint">Нажмите + чтобы добавить человека</p>
+            </div>
+        </div>
+
+        <!-- Карточка человека -->
+        <div class="screen hidden" id="personScreen">
+            <header class="header">
+                <button class="btn-back" id="btnBack">←</button>
+                <h1 id="personName">Имя</h1>
+                <button class="btn-edit" id="btnEdit">✎</button>
+            </header>
+            
+            <main class="person-card" id="personCard"></main>
+        </div>
+
+        <!-- Форма редактирования -->
+        <div class="modal" id="editModal">
+            <div class="modal-content modal-full">
+                <div class="modal-header">
+                    <button class="modal-close" id="editClose">×</button>
+                    <h2 id="editTitle">Новый контакт</h2>
+                    <button class="btn-save" id="btnSave">✓</button>
+                </div>
+                
+                <form id="personForm" class="person-form">
+                    <input type="hidden" id="personId">
+                    
+                    <section class="form-section">
+                        <h3>Основное</h3>
+                        
+                        <div class="form-group">
+                            <label>ФИО *</label>
+                            <input type="text" id="fio" required placeholder="Иванов Иван Иванович">
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Дата рождения</label>
+                                <input type="date" id="birthDate">
+                            </div>
+                            <div class="form-group">
+                                <label>Кем приходится</label>
+                                <input type="text" id="relation" placeholder="Друг, коллега...">
+                            </div>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Место работы</label>
+                            <input type="text" id="workplace" placeholder="Компания, должность">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Финансовое состояние</label>
+                            <select id="financial">
+                                <option value="">Неизвестно</option>
+                                <option value="low">Низкое</option>
+                                <option value="medium">Среднее</option>
+                                <option value="high">Высокое</option>
+                                <option value="wealthy">Состоятельный</option>
+                            </select>
+                        </div>
+                    </section>
+                    
+                    <section class="form-section">
+                        <h3>Характеристика</h3>
+                        
+                        <div class="form-group">
+                            <label>Сильные стороны</label>
+                            <textarea id="strengths" rows="2" placeholder="Надёжный, умный, отзывчивый..."></textarea>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Слабые стороны</label>
+                            <textarea id="weaknesses" rows="2" placeholder="Вспыльчивый, забывчивый..."></textarea>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Возможная польза</label>
+                            <textarea id="benefits" rows="2" placeholder="Чем может быть полезен..."></textarea>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Возможные проблемы</label>
+                            <textarea id="problems" rows="2" placeholder="Чего опасаться..."></textarea>
+                        </div>
+                    </section>
+                    
+                    <section class="form-section">
+                        <h3>Группы / Круги</h3>
+                        <div class="form-group">
+                            <div class="tags-input" id="groupsInput">
+                                <div class="tags-list" id="groupsList"></div>
+                                <input type="text" id="groupInput" placeholder="Добавить группу...">
+                            </div>
+                            <div class="tags-suggestions" id="groupsSuggestions"></div>
+                        </div>
+                    </section>
+                    
+                    <section class="form-section">
+                        <h3>Связи с людьми</h3>
+                        <div class="form-group">
+                            <div class="connections-list" id="connectionsList"></div>
+                            <button type="button" class="btn-add-connection" id="btnAddConnection">+ Добавить связь</button>
+                        </div>
+                    </section>
+                </form>
+                
+                <button type="button" class="btn-delete" id="btnDelete">Удалить контакт</button>
+            </div>
+        </div>
+
+        <!-- Модал добавления заметки -->
+        <div class="modal" id="noteModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Новая заметка</h2>
+                    <button class="modal-close" id="noteClose">×</button>
+                </div>
+                <form id="noteForm">
+                    <div class="form-group">
+                        <textarea id="noteText" rows="4" required placeholder="Текст заметки..."></textarea>
+                    </div>
+                    <button type="submit" class="btn-submit">Добавить</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Модал выбора связи -->
+        <div class="modal" id="connectionModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Выбрать человека</h2>
+                    <button class="modal-close" id="connectionClose">×</button>
+                </div>
+                <div class="connection-search">
+                    <input type="text" id="connectionSearch" placeholder="Поиск...">
+                </div>
+                <div class="connection-list" id="connectionSelectList"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
