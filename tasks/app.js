@@ -1,8 +1,13 @@
 /**
  * Telegram Web App — Список дел
+ * С синхронизацией через API
  */
 
+// Конфигурация API
+const API_URL = window.API_URL || '';  // Будет установлен из конфига
+
 const tg = window.Telegram?.WebApp;
+let userId = 'anonymous';
 
 if (tg) {
     tg.ready();
@@ -11,9 +16,45 @@ if (tg) {
         document.body.classList.add('theme-dark');
     }
     tg.setHeaderColor('secondary_bg_color');
+    
+    // Получаем user_id из Telegram
+    if (tg.initDataUnsafe?.user?.id) {
+        userId = String(tg.initDataUnsafe.user.id);
+    }
 }
 
-// Хранилище
+// === API запросы ===
+const API = {
+    async request(method, endpoint, data = null) {
+        const options = {
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-User-Id': userId
+            }
+        };
+        if (data) {
+            options.body = JSON.stringify(data);
+        }
+        
+        try {
+            const response = await fetch(API_URL + endpoint, options);
+            if (!response.ok) throw new Error('API Error');
+            return await response.json();
+        } catch (error) {
+            console.error('API Error:', error);
+            // Fallback на localStorage если API недоступен
+            return null;
+        }
+    },
+    
+    getTasks() { return this.request('GET', '/api/tasks'); },
+    createTask(task) { return this.request('POST', '/api/tasks', task); },
+    updateTask(id, task) { return this.request('PATCH', `/api/tasks/${id}`, task); },
+    deleteTask(id) { return this.request('DELETE', `/api/tasks/${id}`); }
+};
+
+// === Fallback на localStorage ===
 const Storage = {
     KEY: 'tg_hub_tasks',
     
@@ -29,7 +70,7 @@ const Storage = {
     add(task) {
         const tasks = this.getAll();
         task.id = Date.now();
-        task.createdAt = new Date().toISOString();
+        task.created_at = new Date().toISOString();
         task.done = false;
         tasks.unshift(task);
         this.save(tasks);
@@ -64,7 +105,7 @@ const Storage = {
     }
 };
 
-// Утилиты дат
+// === Утилиты дат ===
 const DateUtils = {
     today() {
         return new Date().toISOString().split('T')[0];
@@ -92,7 +133,7 @@ const DateUtils = {
     }
 };
 
-// DOM
+// === DOM ===
 const DOM = {
     taskList: document.getElementById('taskList'),
     emptyState: document.getElementById('emptyState'),
@@ -110,8 +151,24 @@ const DOM = {
 };
 
 let currentFilter = 'all';
+let tasksCache = [];
+let useApi = !!API_URL;
 
-// Фильтрация
+// === Загрузка задач ===
+async function loadTasks() {
+    if (useApi) {
+        const tasks = await API.getTasks();
+        if (tasks) {
+            tasksCache = tasks;
+            return;
+        }
+    }
+    // Fallback на localStorage
+    useApi = false;
+    tasksCache = Storage.getAll();
+}
+
+// === Фильтрация ===
 function filterTasks(tasks, filter) {
     switch (filter) {
         case 'today': return tasks.filter(t => !t.done && t.deadline === DateUtils.today());
@@ -122,7 +179,7 @@ function filterTasks(tasks, filter) {
     }
 }
 
-// Рендер задачи
+// === Рендер ===
 function renderTask(task) {
     const deadlineClass = task.deadline 
         ? (DateUtils.isOverdue(task.deadline) ? 'overdue' : (DateUtils.isToday(task.deadline) ? 'today' : ''))
@@ -152,13 +209,15 @@ function renderTask(task) {
 }
 
 function escapeHtml(text) {
+    if (!text) return '';
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
 }
 
-function renderTasks() {
-    const tasks = filterTasks(Storage.getAll(), currentFilter);
+async function renderTasks() {
+    await loadTasks();
+    const tasks = filterTasks(tasksCache, currentFilter);
     
     if (tasks.length === 0) {
         DOM.taskList.innerHTML = '';
@@ -169,6 +228,7 @@ function renderTasks() {
     }
 }
 
+// === Действия ===
 function openModal(task = null) {
     DOM.modal.classList.add('open');
     
@@ -193,55 +253,79 @@ function closeModal() {
     DOM.modal.classList.remove('open');
 }
 
-function toggleTask(id) {
-    Storage.toggle(id);
-    renderTasks();
+async function toggleTask(id) {
+    const task = tasksCache.find(t => t.id === id);
+    if (!task) return;
+    
+    const newDone = !task.done;
+    
+    if (useApi) {
+        await API.updateTask(id, { done: newDone });
+    } else {
+        Storage.toggle(id);
+    }
+    
+    await renderTasks();
     if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 }
 
 function editTask(id) {
-    const task = Storage.getAll().find(t => t.id === id);
+    const task = tasksCache.find(t => t.id === id);
     if (task) openModal(task);
 }
 
-function deleteTask(id) {
+async function deleteTask(id) {
+    const doDelete = async () => {
+        if (useApi) {
+            await API.deleteTask(id);
+        } else {
+            Storage.delete(id);
+        }
+        await renderTasks();
+    };
+    
     if (tg?.showConfirm) {
-        tg.showConfirm('Удалить задачу?', (confirmed) => {
-            if (confirmed) {
-                Storage.delete(id);
-                renderTasks();
-            }
+        tg.showConfirm('Удалить задачу?', async (confirmed) => {
+            if (confirmed) await doDelete();
         });
     } else if (confirm('Удалить задачу?')) {
-        Storage.delete(id);
-        renderTasks();
+        await doDelete();
     }
 }
 
-// События
+// === События ===
 DOM.btnAdd.addEventListener('click', () => openModal());
 DOM.modalClose.addEventListener('click', closeModal);
 DOM.modal.addEventListener('click', (e) => { if (e.target === DOM.modal) closeModal(); });
 
-DOM.taskForm.addEventListener('submit', (e) => {
+DOM.taskForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     
     const taskData = {
         title: DOM.title.value.trim(),
         description: DOM.description.value.trim(),
-        deadline: DOM.deadline.value,
+        deadline: DOM.deadline.value || null,
         priority: DOM.priority.value
     };
     
     const id = DOM.taskId.value;
-    if (id) {
-        Storage.update(parseInt(id), taskData);
+    
+    if (useApi) {
+        if (id) {
+            await API.updateTask(parseInt(id), taskData);
+        } else {
+            await API.createTask(taskData);
+        }
     } else {
-        Storage.add(taskData);
+        if (id) {
+            Storage.update(parseInt(id), taskData);
+        } else {
+            Storage.add(taskData);
+        }
     }
     
     closeModal();
-    renderTasks();
+    await renderTasks();
     if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 });
 
@@ -256,5 +340,5 @@ DOM.filters.forEach(btn => {
 
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-// Инициализация
+// === Инициализация ===
 renderTasks();
