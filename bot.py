@@ -30,11 +30,11 @@ scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
 
 def get_main_keyboard() -> InlineKeyboardMarkup:
-    """Главная клавиатура с кнопкой открытия Hub."""
+    """Кнопка Старт — открывает приложение (для новых и текущих пользователей)."""
     if WEBAPP_HUB_URL:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
-                text="🚀 Открыть Hub",
+                text="▶️ Старт",
                 web_app=WebAppInfo(url=WEBAPP_HUB_URL)
             )]
         ])
@@ -43,18 +43,20 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    """Команда /start."""
-    # Убираем Reply клавиатуру
+    """Команда /start — продающий экран для новых пользователей."""
     await message.answer("⚡", reply_markup=ReplyKeyboardRemove())
     
     text = (
-        "⚡ <b>Hub</b>\n\n"
-        "Твой персональный центр управления:\n\n"
-        "📋 <b>Задачи</b> — планируй и выполняй\n"
-        "👤 <b>Картотека</b> — досье на людей\n"
-        "📚 <b>База знаний</b> — храни важное\n"
-        "🤖 <b>ИИ-ассистент</b> — скоро\n\n"
-        "Нажми кнопку ниже, чтобы начать."
+        "👋 <b>YouHub</b> — твой второй мозг в Telegram.\n\n"
+        "Всё в одном месте:\n\n"
+        "📋 <b>Задачи</b> — дедлайны, приоритеты, напоминания\n"
+        "👤 <b>Картотека</b> — досье на людей, связи, заметки\n"
+        "📚 <b>База знаний</b> — важное под рукой\n"
+        "🤖 <b>ИИ-ассистент</b> — советы, создание задач голосом\n\n"
+        "✅ Удобно с телефона\n"
+        "✅ Данные только у тебя\n"
+        "✅ Напоминания в нужный момент\n\n"
+        "Нажми <b>Старт</b> — и за 30 секунд настроишь всё под себя."
     )
     
     kb = get_main_keyboard()
@@ -86,6 +88,30 @@ async def get_overdue_tasks():
             (today,)
         )
         return [dict(row) for row in await cursor.fetchall()]
+
+
+async def send_reminders_by_time():
+    """Напоминания по времени из карточки (запуск каждую минуту)."""
+    now = datetime.now()
+    today = now.date().isoformat()
+    time_str = now.strftime("%H:%M")
+    
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT user_id, title, reminder_time FROM tasks 
+               WHERE deadline = ? AND done = 0 AND reminder_enabled = 1 AND reminder_time = ?""",
+            (today, time_str)
+        )
+        rows = await cursor.fetchall()
+    
+    for row in rows:
+        try:
+            text = f"⏰ <b>Напоминание</b>\n\n{row['title']}"
+            await bot.send_message(int(row['user_id']), text)
+            logger.info(f"Напоминание по времени отправлено {row['user_id']}: {row['title']}")
+        except Exception as e:
+            logger.error(f"Ошибка напоминания {row['user_id']}: {e}")
 
 
 async def send_morning_reminder():
@@ -180,7 +206,10 @@ def setup_scheduler():
     # Днём в 12:00 — просроченные задачи
     scheduler.add_job(send_overdue_reminder, CronTrigger(hour=12, minute=0))
     
-    logger.info("Scheduler настроен: 9:00 (сегодня), 12:00 (просрочка), 20:00 (завтра)")
+    # Каждую минуту — персональное время из карточки задачи
+    scheduler.add_job(send_reminders_by_time, CronTrigger(minute="*"))
+    
+    logger.info("Scheduler: 9:00, 12:00, 20:00 + персональное время")
 
 
 async def main():

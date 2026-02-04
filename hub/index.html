@@ -191,7 +191,8 @@
             </main>
             
             <div class="chat-input-container">
-                <input type="text" id="chatInput" placeholder="Спросить..." onkeydown="if(event.key==='Enter')AI.send()">
+                <button class="btn-mic" id="btnMic" onclick="AI.toggleVoice()" title="Голосом">🎤</button>
+                <input type="text" id="chatInput" placeholder="Спросить или нажать 🎤..." onkeydown="if(event.key==='Enter')AI.send()">
                 <button class="btn-send" onclick="AI.send()">→</button>
             </div>
         </section>
@@ -261,6 +262,16 @@
                         <select id="taskPerson">
                             <option value="">— Не выбрано —</option>
                         </select>
+                    </div>
+                    <div class="form-group reminder-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="taskReminder" onchange="Tasks.toggleReminderField()">
+                            <span>🔔 Напоминание</span>
+                        </label>
+                        <div class="reminder-time-wrap" id="taskReminderTimeWrap" style="display:none;margin-top:10px">
+                            <label>Во сколько напомнить</label>
+                            <input type="time" id="taskReminderTime" value="09:00" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);font-size:16px">
+                        </div>
                     </div>
                 </form>
                 <button class="btn-delete" id="taskDelete" onclick="Tasks.delete()">Удалить</button>

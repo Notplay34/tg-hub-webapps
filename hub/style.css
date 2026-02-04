@@ -762,6 +762,43 @@ body {
 
 .form-row .form-group { flex: 1; }
 
+#taskForm { padding-bottom: 24px; }
+.reminder-row {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+.reminder-row .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 15px;
+}
+.reminder-row .checkbox-label input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+}
+.reminder-time-wrap {
+    margin-top: 10px;
+    padding-left: 0;
+}
+.reminder-time-wrap label {
+    display: block;
+    font-size: 12px;
+    margin-bottom: 4px;
+    color: var(--text-secondary);
+}
+.reminder-time-wrap input[type="time"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 16px;
+}
+
 .btn-delete {
     width: 100%;
     padding: 12px;
@@ -891,6 +928,7 @@ body {
 
 .chat-input-container {
     display: flex;
+    align-items: center;
     gap: 8px;
     padding: 12px 16px;
     border-top: 1px solid var(--border);
@@ -911,6 +949,29 @@ body {
 .chat-input-container input:focus {
     outline: none;
     border-color: var(--accent);
+}
+
+.btn-mic {
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg-secondary);
+    color: var(--text);
+    font-size: 20px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.2s, transform 0.2s;
+}
+.btn-mic:active { transform: scale(0.95); }
+.btn-mic.recording {
+    background: #e53935;
+    color: white;
+    animation: pulse-mic 1s ease infinite;
+}
+@keyframes pulse-mic {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
 }
 
 .btn-send {

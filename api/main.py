@@ -283,6 +283,9 @@ async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(..
                 values.append(int(value))
                 if value and not old_done:
                     action_type = "completed"
+            elif field == 'reminder_enabled':
+                updates.append("reminder_enabled = ?")
+                values.append(int(bool(value)))
             elif value is not None or field == 'person_id':
                 updates.append(f"{field} = ?")
                 values.append(value)
