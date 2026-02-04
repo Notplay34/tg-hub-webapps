@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Hub</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- ===== ЗАДАЧИ ===== -->
+        <section class="screen active" id="tasksScreen">
+            <header class="header">
+                <h1>Задачи</h1>
+                <button class="btn-icon" onclick="Tasks.openModal()">+</button>
+            </header>
+            
+            <nav class="filters" id="tasksFilters">
+                <button class="filter active" data-filter="all">Все</button>
+                <button class="filter" data-filter="today">Сегодня</button>
+                <button class="filter" data-filter="week">Неделя</button>
+                <button class="filter" data-filter="done">Готово</button>
+            </nav>
+            
+            <main class="content" id="tasksList"></main>
+            <div class="empty" id="tasksEmpty">Нет задач</div>
+        </section>
+
+        <!-- ===== ЛЮДИ ===== -->
+        <section class="screen" id="peopleScreen">
+            <header class="header">
+                <h1>Картотека</h1>
+                <button class="btn-icon" onclick="People.openModal()">+</button>
+            </header>
+            
+            <div class="search-box">
+                <input type="text" id="peopleSearch" placeholder="Поиск..." oninput="People.render()">
+            </div>
+            
+            <nav class="filters" id="peopleFilters"></nav>
+            
+            <main class="content" id="peopleList"></main>
+            <div class="empty" id="peopleEmpty">Картотека пуста</div>
+        </section>
+
+        <!-- ===== КАРТОЧКА ЧЕЛОВЕКА ===== -->
+        <section class="screen" id="personScreen">
+            <header class="header">
+                <button class="btn-back" onclick="People.closeCard()">←</button>
+                <h1 id="personName">Имя</h1>
+                <button class="btn-icon edit" onclick="People.edit()">✎</button>
+            </header>
+            <main class="content" id="personCard"></main>
+        </section>
+
+        <!-- ===== БАЗА ЗНАНИЙ ===== -->
+        <section class="screen" id="knowledgeScreen">
+            <header class="header">
+                <h1>База знаний</h1>
+                <button class="btn-icon" onclick="Knowledge.openModal()">+</button>
+            </header>
+            
+            <div class="search-box">
+                <input type="text" id="knowledgeSearch" placeholder="Поиск..." oninput="Knowledge.render()">
+            </div>
+            
+            <nav class="filters" id="knowledgeFilters"></nav>
+            
+            <main class="content" id="knowledgeList"></main>
+            <div class="empty" id="knowledgeEmpty">База пуста</div>
+        </section>
+
+        <!-- ===== ИИ АССИСТЕНТ ===== -->
+        <section class="screen" id="aiScreen">
+            <header class="header">
+                <h1>Ассистент</h1>
+            </header>
+            
+            <main class="chat-container" id="chatContainer">
+                <div class="chat-welcome">
+                    <div class="ai-avatar">🤖</div>
+                    <p>Привет! Я твой ассистент.<br>Спроси меня о задачах, людях или знаниях.</p>
+                </div>
+                <div class="chat-messages" id="chatMessages"></div>
+            </main>
+            
+            <div class="chat-input-container">
+                <input type="text" id="chatInput" placeholder="Спросить..." onkeydown="if(event.key==='Enter')AI.send()">
+                <button class="btn-send" onclick="AI.send()">→</button>
+            </div>
+        </section>
+
+        <!-- ===== НАВИГАЦИЯ ===== -->
+        <nav class="bottom-nav">
+            <button class="nav-item active" data-screen="tasksScreen">
+                <span class="nav-icon">📋</span>
+                <span class="nav-label">Задачи</span>
+            </button>
+            <button class="nav-item" data-screen="peopleScreen">
+                <span class="nav-icon">👤</span>
+                <span class="nav-label">Люди</span>
+            </button>
+            <button class="nav-item" data-screen="knowledgeScreen">
+                <span class="nav-icon">📚</span>
+                <span class="nav-label">База</span>
+            </button>
+            <button class="nav-item" data-screen="aiScreen">
+                <span class="nav-icon">🤖</span>
+                <span class="nav-label">ИИ</span>
+            </button>
+        </nav>
+
+        <!-- ===== МОДАЛЬНЫЕ ОКНА ===== -->
+        
+        <!-- Задача -->
+        <div class="modal" id="taskModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="Tasks.closeModal()">×</button>
+                    <h2 id="taskModalTitle">Новая задача</h2>
+                    <button class="btn-save" onclick="Tasks.save()">✓</button>
+                </div>
+                <form id="taskForm" onsubmit="return false">
+                    <input type="hidden" id="taskId">
+                    <div class="form-group">
+                        <input type="text" id="taskTitle" placeholder="Что нужно сделать?" required>
+                    </div>
+                    <div class="form-group">
+                        <textarea id="taskDesc" rows="2" placeholder="Описание"></textarea>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Дедлайн</label>
+                            <input type="date" id="taskDeadline">
+                        </div>
+                        <div class="form-group">
+                            <label>Приоритет</label>
+                            <select id="taskPriority">
+                                <option value="low">Низкий</option>
+                                <option value="medium" selected>Средний</option>
+                                <option value="high">Высокий</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Связать с человеком</label>
+                        <select id="taskPerson">
+                            <option value="">— Не выбрано —</option>
+                        </select>
+                    </div>
+                </form>
+                <button class="btn-delete" id="taskDelete" onclick="Tasks.delete()">Удалить</button>
+            </div>
+        </div>
+
+        <!-- Человек -->
+        <div class="modal" id="personModal">
+            <div class="modal-content modal-full">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="People.closeModal()">×</button>
+                    <h2 id="personModalTitle">Новый контакт</h2>
+                    <button class="btn-save" onclick="People.save()">✓</button>
+                </div>
+                <form id="personForm" onsubmit="return false">
+                    <input type="hidden" id="personId">
+                    
+                    <div class="form-section">
+                        <div class="form-group">
+                            <label>ФИО *</label>
+                            <input type="text" id="personFio" required placeholder="Иванов Иван">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Дата рождения</label>
+                                <input type="date" id="personBirth">
+                            </div>
+                            <div class="form-group">
+                                <label>Кем приходится</label>
+                                <input type="text" id="personRelation" placeholder="Друг, коллега">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Место работы</label>
+                            <input type="text" id="personWork" placeholder="Компания">
+                        </div>
+                    </div>
+                    
+                    <div class="form-section">
+                        <h3>Характеристика</h3>
+                        <div class="form-group">
+                            <label>Сильные стороны</label>
+                            <textarea id="personStrengths" rows="2"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Слабые стороны</label>
+                            <textarea id="personWeaknesses" rows="2"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Возможная польза</label>
+                            <textarea id="personBenefits" rows="2"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Возможные проблемы</label>
+                            <textarea id="personProblems" rows="2"></textarea>
+                        </div>
+                    </div>
+                    
+                    <div class="form-section">
+                        <h3>Группы</h3>
+                        <div class="tags-container">
+                            <div class="tags-list" id="personGroupsList"></div>
+                            <input type="text" id="personGroupInput" placeholder="+ группа" onkeydown="if(event.key==='Enter'){event.preventDefault();People.addGroup()}">
+                        </div>
+                    </div>
+                </form>
+                <button class="btn-delete" id="personDelete" onclick="People.delete()">Удалить контакт</button>
+            </div>
+        </div>
+
+        <!-- Заметка к человеку -->
+        <div class="modal" id="noteModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="People.closeNoteModal()">×</button>
+                    <h2>Новая заметка</h2>
+                    <button class="btn-save" onclick="People.saveNote()">✓</button>
+                </div>
+                <div class="form-group">
+                    <textarea id="noteText" rows="4" placeholder="Заметка..."></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- Знание -->
+        <div class="modal" id="knowledgeModal">
+            <div class="modal-content modal-full">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="Knowledge.closeModal()">×</button>
+                    <h2 id="knowledgeModalTitle">Новая запись</h2>
+                    <button class="btn-save" onclick="Knowledge.save()">✓</button>
+                </div>
+                <form id="knowledgeForm" onsubmit="return false">
+                    <input type="hidden" id="knowledgeId">
+                    <div class="form-group">
+                        <input type="text" id="knowledgeTitle" placeholder="Заголовок" required>
+                    </div>
+                    <div class="form-group">
+                        <textarea id="knowledgeContent" rows="8" placeholder="Содержание..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Связать с человеком</label>
+                        <select id="knowledgePerson">
+                            <option value="">— Не выбрано —</option>
+                        </select>
+                    </div>
+                    <div class="form-section">
+                        <h3>Теги</h3>
+                        <div class="tags-container">
+                            <div class="tags-list" id="knowledgeTagsList"></div>
+                            <input type="text" id="knowledgeTagInput" placeholder="+ тег" onkeydown="if(event.key==='Enter'){event.preventDefault();Knowledge.addTag()}">
+                        </div>
+                    </div>
+                </form>
+                <button class="btn-delete" id="knowledgeDelete" onclick="Knowledge.delete()">Удалить</button>
+            </div>
+        </div>
+
+        <!-- Просмотр знания -->
+        <div class="modal" id="knowledgeViewModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="Knowledge.closeView()">×</button>
+                    <h2 id="knowledgeViewTitle">Заголовок</h2>
+                    <button class="btn-icon edit" onclick="Knowledge.editCurrent()">✎</button>
+                </div>
+                <div class="view-content" id="knowledgeViewContent"></div>
+                <div class="view-meta" id="knowledgeViewMeta"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

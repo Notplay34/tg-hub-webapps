@@ -1,22 +1,20 @@
 """
-TG Hub — главный файл бота.
+TG Hub — Telegram бот с единым Web App.
 """
 
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, ReplyKeyboardRemove
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from config import BOT_TOKEN, WEBAPP_TASKS_URL, WEBAPP_PEOPLE_URL, WEBAPP_KNOWLEDGE_URL
+from config import BOT_TOKEN, WEBAPP_HUB_URL
 
-# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Бот и диспетчер
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -24,74 +22,43 @@ bot = Bot(
 dp = Dispatcher()
 
 
-def get_main_keyboard() -> ReplyKeyboardMarkup:
-    """Главное меню с Web Apps."""
-    # Кнопка Список дел
-    if WEBAPP_TASKS_URL:
-        tasks_btn = KeyboardButton(
-            text="📋 Список дел",
-            web_app=WebAppInfo(url=WEBAPP_TASKS_URL)
-        )
-    else:
-        tasks_btn = KeyboardButton(text="📋 Список дел")
-    
-    # Кнопка Картотека
-    if WEBAPP_PEOPLE_URL:
-        people_btn = KeyboardButton(
-            text="👤 Картотека",
-            web_app=WebAppInfo(url=WEBAPP_PEOPLE_URL)
-        )
-    else:
-        people_btn = KeyboardButton(text="👤 Картотека")
-    
-    # Кнопка База знаний
-    if WEBAPP_KNOWLEDGE_URL:
-        knowledge_btn = KeyboardButton(
-            text="📚 База знаний",
-            web_app=WebAppInfo(url=WEBAPP_KNOWLEDGE_URL)
-        )
-    else:
-        knowledge_btn = KeyboardButton(text="📚 База знаний")
-    
-    buttons = [
-        [tasks_btn],
-        [people_btn, knowledge_btn]
-    ]
-    
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+def get_main_keyboard() -> InlineKeyboardMarkup:
+    """Главная клавиатура с кнопкой открытия Hub."""
+    if WEBAPP_HUB_URL:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🚀 Открыть Hub",
+                web_app=WebAppInfo(url=WEBAPP_HUB_URL)
+            )]
+        ])
+    return None
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     """Команда /start."""
-    await message.answer(
+    # Убираем Reply клавиатуру
+    await message.answer("⚡", reply_markup=ReplyKeyboardRemove())
+    
+    text = (
         "⚡ <b>Hub</b>\n\n"
-        "Всё важное — в одном месте.\n"
-        "Люди, задачи, знания — под контролем.",
-        reply_markup=get_main_keyboard()
+        "Твой персональный центр управления:\n\n"
+        "📋 <b>Задачи</b> — планируй и выполняй\n"
+        "👤 <b>Картотека</b> — досье на людей\n"
+        "📚 <b>База знаний</b> — храни важное\n"
+        "🤖 <b>ИИ-ассистент</b> — скоро\n\n"
+        "Нажми кнопку ниже, чтобы начать."
     )
-
-
-@dp.message(F.text == "👤 Картотека")
-async def msg_people(message: Message):
-    """Картотека — fallback."""
-    await message.answer("👤 <b>Картотека</b>\n\nНастройте WEBAPP_PEOPLE_URL")
-
-
-@dp.message(F.text == "📚 База знаний")
-async def msg_knowledge(message: Message):
-    """База знаний — fallback."""
-    await message.answer("📚 <b>База знаний</b>\n\nНастройте WEBAPP_KNOWLEDGE_URL")
-
-
-@dp.message(F.text == "📋 Список дел")
-async def msg_tasks(message: Message):
-    """Список дел — fallback."""
-    await message.answer("📋 <b>Список дел</b>\n\nНастройте WEBAPP_TASKS_URL")
+    
+    kb = get_main_keyboard()
+    
+    if not WEBAPP_HUB_URL:
+        text += "\n\n<i>⚠️ WEBAPP_HUB_URL не настроен</i>"
+    
+    await message.answer(text, reply_markup=kb)
 
 
 async def main():
-    """Запуск бота."""
     logger.info("Запуск бота...")
     await dp.start_polling(bot)
 

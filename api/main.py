@@ -12,7 +12,6 @@ from pathlib import Path
 
 app = FastAPI(title="TG Hub API")
 
-# CORS для Web Apps
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,6 +31,7 @@ class Task(BaseModel):
     deadline: Optional[str] = None
     priority: str = "medium"
     done: bool = False
+    person_id: Optional[int] = None
 
 
 class TaskUpdate(BaseModel):
@@ -40,6 +40,7 @@ class TaskUpdate(BaseModel):
     deadline: Optional[str] = None
     priority: Optional[str] = None
     done: Optional[bool] = None
+    person_id: Optional[int] = None
 
 
 class Person(BaseModel):
@@ -64,16 +65,15 @@ class Knowledge(BaseModel):
     title: str
     content: Optional[str] = ""
     tags: Optional[List[str]] = []
+    person_id: Optional[int] = None
 
 
 # === База данных ===
 
 async def init_db():
-    """Инициализация БД."""
     Path("data").mkdir(exist_ok=True)
     
     async with aiosqlite.connect(DATABASE) as db:
-        # Таблица задач
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,11 +83,11 @@ async def init_db():
                 deadline DATE,
                 priority TEXT DEFAULT 'medium',
                 done INTEGER DEFAULT 0,
+                person_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
-        # Таблица людей
         await db.execute("""
             CREATE TABLE IF NOT EXISTS people (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +98,6 @@ async def init_db():
             )
         """)
         
-        # Таблица заметок к людям
         await db.execute("""
             CREATE TABLE IF NOT EXISTS person_notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,7 +108,6 @@ async def init_db():
             )
         """)
         
-        # Таблица базы знаний
         await db.execute("""
             CREATE TABLE IF NOT EXISTS knowledge (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,9 +115,20 @@ async def init_db():
                 title TEXT NOT NULL,
                 content TEXT,
                 tags TEXT DEFAULT '[]',
+                person_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Миграция: добавляем person_id если нет
+        try:
+            await db.execute("ALTER TABLE tasks ADD COLUMN person_id INTEGER")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE knowledge ADD COLUMN person_id INTEGER")
+        except:
+            pass
         
         await db.commit()
 
@@ -133,25 +142,22 @@ async def startup():
 
 @app.get("/api/tasks")
 async def get_tasks(x_user_id: str = Header(...)):
-    """Получить все задачи."""
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC",
             (x_user_id,)
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
 
 
 @app.post("/api/tasks")
 async def create_task(task: Task, x_user_id: str = Header(...)):
-    """Создать задачу."""
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
-            """INSERT INTO tasks (user_id, title, description, deadline, priority, done)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (x_user_id, task.title, task.description, task.deadline, task.priority, int(task.done))
+            """INSERT INTO tasks (user_id, title, description, deadline, priority, done, person_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (x_user_id, task.title, task.description, task.deadline, task.priority, int(task.done), task.person_id)
         )
         await db.commit()
         return {"id": cursor.lastrowid}
@@ -159,20 +165,21 @@ async def create_task(task: Task, x_user_id: str = Header(...)):
 
 @app.patch("/api/tasks/{task_id}")
 async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(...)):
-    """Обновить задачу."""
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            "SELECT id FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id)
-        )
+        cursor = await db.execute("SELECT id FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id))
         if not await cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Not found")
+            raise HTTPException(status_code=404)
         
         updates = []
         values = []
-        for field, value in task.dict(exclude_unset=True).items():
-            if value is not None:
+        data = task.dict(exclude_unset=True)
+        for field, value in data.items():
+            if field == 'done':
+                updates.append("done = ?")
+                values.append(int(value))
+            elif value is not None or field == 'person_id':
                 updates.append(f"{field} = ?")
-                values.append(int(value) if isinstance(value, bool) else value)
+                values.append(value)
         
         if updates:
             values.append(task_id)
@@ -184,7 +191,6 @@ async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(..
 
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: int, x_user_id: str = Header(...)):
-    """Удалить задачу."""
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id))
         await db.commit()
@@ -195,18 +201,14 @@ async def delete_task(task_id: int, x_user_id: str = Header(...)):
 
 @app.get("/api/people")
 async def get_people(x_user_id: str = Header(...)):
-    """Получить всех людей."""
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM people WHERE user_id = ? ORDER BY created_at DESC", (x_user_id,)
-        )
+        cursor = await db.execute("SELECT * FROM people WHERE user_id = ? ORDER BY created_at DESC", (x_user_id,))
         rows = await cursor.fetchall()
         result = []
         for row in rows:
             person = dict(row)
             person['data'] = json.loads(person['data'])
-            # Заметки
             notes_cursor = await db.execute(
                 "SELECT id, text, created_at FROM person_notes WHERE person_id = ? ORDER BY created_at DESC",
                 (person['id'],)
@@ -218,7 +220,6 @@ async def get_people(x_user_id: str = Header(...)):
 
 @app.post("/api/people")
 async def create_person(person: Person, x_user_id: str = Header(...)):
-    """Создать карточку человека."""
     data = person.dict(exclude={'fio'})
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
@@ -231,14 +232,11 @@ async def create_person(person: Person, x_user_id: str = Header(...)):
 
 @app.patch("/api/people/{person_id}")
 async def update_person(person_id: int, person: Person, x_user_id: str = Header(...)):
-    """Обновить карточку."""
     data = person.dict(exclude={'fio'})
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            "SELECT id FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id)
-        )
+        cursor = await db.execute("SELECT id FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
         if not await cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Not found")
+            raise HTTPException(status_code=404)
         
         await db.execute(
             "UPDATE people SET fio = ?, data = ? WHERE id = ?",
@@ -250,7 +248,6 @@ async def update_person(person_id: int, person: Person, x_user_id: str = Header(
 
 @app.delete("/api/people/{person_id}")
 async def delete_person(person_id: int, x_user_id: str = Header(...)):
-    """Удалить карточку."""
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute("DELETE FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
         await db.commit()
@@ -258,25 +255,19 @@ async def delete_person(person_id: int, x_user_id: str = Header(...)):
 
 
 @app.post("/api/people/{person_id}/notes")
-async def add_person_note(person_id: int, note: Note, x_user_id: str = Header(...)):
-    """Добавить заметку к человеку."""
+async def add_note(person_id: int, note: Note, x_user_id: str = Header(...)):
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            "SELECT id FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id)
-        )
+        cursor = await db.execute("SELECT id FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
         if not await cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Not found")
+            raise HTTPException(status_code=404)
         
-        cursor = await db.execute(
-            "INSERT INTO person_notes (person_id, text) VALUES (?, ?)", (person_id, note.text)
-        )
+        cursor = await db.execute("INSERT INTO person_notes (person_id, text) VALUES (?, ?)", (person_id, note.text))
         await db.commit()
         return {"id": cursor.lastrowid}
 
 
 @app.delete("/api/people/{person_id}/notes/{note_id}")
-async def delete_person_note(person_id: int, note_id: int, x_user_id: str = Header(...)):
-    """Удалить заметку."""
+async def delete_note(person_id: int, note_id: int, x_user_id: str = Header(...)):
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute("DELETE FROM person_notes WHERE id = ? AND person_id = ?", (note_id, person_id))
         await db.commit()
@@ -287,12 +278,9 @@ async def delete_person_note(person_id: int, note_id: int, x_user_id: str = Head
 
 @app.get("/api/knowledge")
 async def get_knowledge(x_user_id: str = Header(...)):
-    """Получить все записи базы знаний."""
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM knowledge WHERE user_id = ? ORDER BY created_at DESC", (x_user_id,)
-        )
+        cursor = await db.execute("SELECT * FROM knowledge WHERE user_id = ? ORDER BY created_at DESC", (x_user_id,))
         rows = await cursor.fetchall()
         result = []
         for row in rows:
@@ -304,11 +292,10 @@ async def get_knowledge(x_user_id: str = Header(...)):
 
 @app.post("/api/knowledge")
 async def create_knowledge(item: Knowledge, x_user_id: str = Header(...)):
-    """Создать запись."""
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
-            "INSERT INTO knowledge (user_id, title, content, tags) VALUES (?, ?, ?, ?)",
-            (x_user_id, item.title, item.content, json.dumps(item.tags, ensure_ascii=False))
+            "INSERT INTO knowledge (user_id, title, content, tags, person_id) VALUES (?, ?, ?, ?, ?)",
+            (x_user_id, item.title, item.content, json.dumps(item.tags, ensure_ascii=False), item.person_id)
         )
         await db.commit()
         return {"id": cursor.lastrowid}
@@ -316,17 +303,14 @@ async def create_knowledge(item: Knowledge, x_user_id: str = Header(...)):
 
 @app.patch("/api/knowledge/{item_id}")
 async def update_knowledge(item_id: int, item: Knowledge, x_user_id: str = Header(...)):
-    """Обновить запись."""
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            "SELECT id FROM knowledge WHERE id = ? AND user_id = ?", (item_id, x_user_id)
-        )
+        cursor = await db.execute("SELECT id FROM knowledge WHERE id = ? AND user_id = ?", (item_id, x_user_id))
         if not await cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Not found")
+            raise HTTPException(status_code=404)
         
         await db.execute(
-            "UPDATE knowledge SET title = ?, content = ?, tags = ? WHERE id = ?",
-            (item.title, item.content, json.dumps(item.tags, ensure_ascii=False), item_id)
+            "UPDATE knowledge SET title = ?, content = ?, tags = ?, person_id = ? WHERE id = ?",
+            (item.title, item.content, json.dumps(item.tags, ensure_ascii=False), item.person_id, item_id)
         )
         await db.commit()
         return {"ok": True}
@@ -334,7 +318,6 @@ async def update_knowledge(item_id: int, item: Knowledge, x_user_id: str = Heade
 
 @app.delete("/api/knowledge/{item_id}")
 async def delete_knowledge(item_id: int, x_user_id: str = Header(...)):
-    """Удалить запись."""
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute("DELETE FROM knowledge WHERE id = ? AND user_id = ?", (item_id, x_user_id))
         await db.commit()
