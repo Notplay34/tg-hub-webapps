@@ -157,8 +157,11 @@ async function loadAllData(showLoading = true) {
         hideErrorState('people');
         hideErrorState('knowledge');
         
-        // Обновляем главный экран
+        // Обновляем все экраны сразу
         Today.render();
+        Tasks.render();
+        People.render();
+        Knowledge.render();
     } catch (e) {
         console.error('Load error:', e);
         hideLoadingState('tasks');
@@ -563,7 +566,7 @@ const Tasks = {
                 await API.request('POST', '/api/tasks', data);
             }
             this.closeModal();
-            await loadAllData();
+            await loadAllData(false);
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         } catch (e) {
@@ -583,7 +586,7 @@ const Tasks = {
         
         try {
             await API.request('PATCH', `/api/tasks/${id}`, { done: !task.done });
-            await loadAllData();
+            await loadAllData(false);
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
         } catch (e) {}
@@ -596,7 +599,7 @@ const Tasks = {
         const doDelete = async () => {
             await API.request('DELETE', `/api/tasks/${taskId}`);
             if (!id) this.closeModal();
-            await loadAllData();
+            await loadAllData(false);
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         };
@@ -884,7 +887,7 @@ const People = {
                 this.currentId = result.id;
             }
             this.closeModal();
-            await loadAllData();
+            await loadAllData(false);
             this.render();
             
             if (this.currentId) {
@@ -917,7 +920,7 @@ const People = {
                 this.closeModal();
                 this.closeCard();
             }
-            await loadAllData();
+            await loadAllData(false);
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         };
@@ -945,7 +948,7 @@ const People = {
         try {
             await API.request('POST', `/api/people/${this.currentId}/notes`, { text });
             this.closeNoteModal();
-            await loadAllData();
+            await loadAllData(false);
             const person = peopleData.find(p => p.id === this.currentId);
             if (person) this.renderCard(person);
         } catch (e) {}
@@ -954,7 +957,7 @@ const People = {
     async deleteNote(noteId) {
         const doDelete = async () => {
             await API.request('DELETE', `/api/people/${this.currentId}/notes/${noteId}`);
-            await loadAllData();
+            await loadAllData(false);
             const person = peopleData.find(p => p.id === this.currentId);
             if (person) this.renderCard(person);
         };
@@ -1146,7 +1149,7 @@ const Knowledge = {
                 await API.request('POST', '/api/knowledge', data);
             }
             this.closeModal();
-            await loadAllData();
+            await loadAllData(false);
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         } catch (e) {
@@ -1167,7 +1170,7 @@ const Knowledge = {
         const doDelete = async () => {
             await API.request('DELETE', `/api/knowledge/${itemId}`);
             if (!id) this.closeModal();
-            await loadAllData();
+            await loadAllData(false);
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         };
