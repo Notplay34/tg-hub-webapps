@@ -452,9 +452,11 @@ body {
     justify-content: center;
     opacity: 0;
     transition: opacity 0.2s ease, background 0.2s ease;
+    z-index: 10;
 }
 
-.card:hover .card-delete {
+.card:hover .card-delete,
+.person-item:hover .card-delete {
     opacity: 1;
 }
 
@@ -472,6 +474,12 @@ body {
     border-radius: 12px;
     margin-bottom: 10px;
     cursor: pointer;
+    position: relative;
+    transition: background 0.2s ease;
+}
+
+.person-item:hover {
+    background: var(--bg-card);
 }
 
 .avatar {

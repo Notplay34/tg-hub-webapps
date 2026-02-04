@@ -15,12 +15,33 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Google Gemini клиент (OpenAI-совместимый)
+# Поддержка разных провайдеров ИИ
+# Приоритет: OpenRouter > vsellm > Google > Yandex
+api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("VSELM_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("YANDEX_API_KEY")
+
+if os.getenv("OPENROUTER_API_KEY"):
+    base_url = "https://openrouter.ai/api/v1"
+elif os.getenv("VSELM_API_KEY"):
+    base_url = os.getenv("VSELM_BASE_URL", "https://api.vsellm.ru/v1")
+elif os.getenv("GOOGLE_API_KEY"):
+    base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+else:
+    base_url = None
+
+# Для OpenRouter нужны дополнительные заголовки
+default_headers = {}
+if os.getenv("OPENROUTER_API_KEY"):
+    default_headers = {
+        "HTTP-Referer": "https://tghub.duckdns.org",
+        "X-Title": "YouHub"
+    }
+
 openai_client = AsyncOpenAI(
-    api_key=os.getenv("GOOGLE_API_KEY"),
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-    timeout=60.0
-)
+    api_key=api_key,
+    base_url=base_url,
+    timeout=120.0,  # Увеличен таймаут для бесплатных моделей
+    default_headers=default_headers if default_headers else None
+) if api_key and base_url else None
 
 app = FastAPI(title="TG Hub API")
 
@@ -476,9 +497,23 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 - Отвечай на русском языке
 - Будь полезным и проактивным"""
 
+    if not openai_client:
+        return {"response": "ИИ не настроен. Установите VSELM_API_KEY, GOOGLE_API_KEY или YANDEX_API_KEY в .env"}
+    
     try:
+        # Определяем модель в зависимости от провайдера
+        model = os.getenv("AI_MODEL", "gpt-3.5-turbo")  # Можно переопределить через .env
+        
+        if "openrouter.ai" in base_url:
+            # Бесплатные модели OpenRouter
+            model = os.getenv("AI_MODEL", "google/gemma-3-4b-it:free")  # Быстрая бесплатная модель
+        elif "vsellm.ru" in base_url:
+            model = os.getenv("AI_MODEL", "gpt-3.5-turbo")
+        elif "google" in base_url.lower():
+            model = os.getenv("AI_MODEL", "gemini-pro")
+        
         response = await openai_client.chat.completions.create(
-            model="gemini-pro",
+            model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": msg.message}
@@ -490,7 +525,12 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         return {"response": response.choices[0].message.content}
     
     except Exception as e:
-        return {"response": f"Ошибка ИИ: {str(e)}"}
+        error_msg = str(e)
+        if "403" in error_msg or "Forbidden" in error_msg:
+            return {"response": "Ошибка доступа к ИИ. Проверьте API ключ и доступность сервиса из России."}
+        elif "429" in error_msg or "quota" in error_msg.lower():
+            return {"response": "Лимит запросов исчерпан. Попробуйте позже или используйте другой API."}
+        return {"response": f"Ошибка ИИ: {error_msg}"}
 
 
 if __name__ == "__main__":
