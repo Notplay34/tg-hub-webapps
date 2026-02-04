@@ -2,6 +2,7 @@
 API для TG Hub — хранение данных на сервере.
 """
 
+import os
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,6 +10,17 @@ from typing import Optional, List
 import aiosqlite
 import json
 from pathlib import Path
+from openai import AsyncOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Google Gemini клиент (OpenAI-совместимый)
+openai_client = AsyncOpenAI(
+    api_key=os.getenv("GOOGLE_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    timeout=60.0
+)
 
 app = FastAPI(title="TG Hub API")
 
@@ -68,6 +80,10 @@ class Knowledge(BaseModel):
     person_id: Optional[int] = None
 
 
+class ChatMessage(BaseModel):
+    message: str
+
+
 # === База данных ===
 
 async def init_db():
@@ -120,6 +136,19 @@ async def init_db():
             )
         """)
         
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS timeline (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                entity_title TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # Миграция: добавляем person_id если нет
         try:
             await db.execute("ALTER TABLE tasks ADD COLUMN person_id INTEGER")
@@ -138,6 +167,21 @@ async def startup():
     await init_db()
 
 
+# === УТИЛИТЫ ===
+
+async def log_timeline(db, user_id: str, action_type: str, entity_type: str, entity_id: int, entity_title: str, details: str = ""):
+    """Логирование события в timeline."""
+    try:
+        await db.execute(
+            """INSERT INTO timeline (user_id, action_type, entity_type, entity_id, entity_title, details)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, action_type, entity_type, entity_id, entity_title, details)
+        )
+    except Exception as e:
+        # Игнорируем ошибки timeline, чтобы не ломать основную функциональность
+        print(f"Timeline log error: {e}")
+
+
 # === ЗАДАЧИ ===
 
 @app.get("/api/tasks")
@@ -153,30 +197,43 @@ async def get_tasks(x_user_id: str = Header(...)):
 
 @app.post("/api/tasks")
 async def create_task(task: Task, x_user_id: str = Header(...)):
-    async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            """INSERT INTO tasks (user_id, title, description, deadline, priority, done, person_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (x_user_id, task.title, task.description, task.deadline, task.priority, int(task.done), task.person_id)
-        )
-        await db.commit()
-        return {"id": cursor.lastrowid}
+    try:
+        async with aiosqlite.connect(DATABASE) as db:
+            cursor = await db.execute(
+                """INSERT INTO tasks (user_id, title, description, deadline, priority, done, person_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (x_user_id, task.title, task.description, task.deadline, task.priority, int(task.done), task.person_id)
+            )
+            task_id = cursor.lastrowid
+            await log_timeline(db, x_user_id, "created", "task", task_id, task.title)
+            await db.commit()
+            return {"id": task_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка создания задачи: {str(e)}")
 
 
 @app.patch("/api/tasks/{task_id}")
 async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(...)):
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT id FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id))
-        if not await cursor.fetchone():
+        cursor = await db.execute("SELECT title, done FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id))
+        row = await cursor.fetchone()
+        if not row:
             raise HTTPException(status_code=404)
+        
+        old_done = row[1]
+        task_title = row[0]
         
         updates = []
         values = []
         data = task.dict(exclude_unset=True)
+        action_type = "updated"
+        
         for field, value in data.items():
             if field == 'done':
                 updates.append("done = ?")
                 values.append(int(value))
+                if value and not old_done:
+                    action_type = "completed"
             elif value is not None or field == 'person_id':
                 updates.append(f"{field} = ?")
                 values.append(value)
@@ -184,6 +241,7 @@ async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(..
         if updates:
             values.append(task_id)
             await db.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", values)
+            await log_timeline(db, x_user_id, action_type, "task", task_id, task_title)
             await db.commit()
         
         return {"ok": True}
@@ -192,6 +250,10 @@ async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(..
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: int, x_user_id: str = Header(...)):
     async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT title FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id))
+        row = await cursor.fetchone()
+        if row:
+            await log_timeline(db, x_user_id, "deleted", "task", task_id, row[0])
         await db.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id))
         await db.commit()
         return {"ok": True}
@@ -226,8 +288,10 @@ async def create_person(person: Person, x_user_id: str = Header(...)):
             "INSERT INTO people (user_id, fio, data) VALUES (?, ?, ?)",
             (x_user_id, person.fio, json.dumps(data, ensure_ascii=False))
         )
+        person_id = cursor.lastrowid
+        await log_timeline(db, x_user_id, "created", "person", person_id, person.fio)
         await db.commit()
-        return {"id": cursor.lastrowid}
+        return {"id": person_id}
 
 
 @app.patch("/api/people/{person_id}")
@@ -242,6 +306,7 @@ async def update_person(person_id: int, person: Person, x_user_id: str = Header(
             "UPDATE people SET fio = ?, data = ? WHERE id = ?",
             (person.fio, json.dumps(data, ensure_ascii=False), person_id)
         )
+        await log_timeline(db, x_user_id, "updated", "person", person_id, person.fio)
         await db.commit()
         return {"ok": True}
 
@@ -249,6 +314,10 @@ async def update_person(person_id: int, person: Person, x_user_id: str = Header(
 @app.delete("/api/people/{person_id}")
 async def delete_person(person_id: int, x_user_id: str = Header(...)):
     async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT fio FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
+        row = await cursor.fetchone()
+        if row:
+            await log_timeline(db, x_user_id, "deleted", "person", person_id, row[0])
         await db.execute("DELETE FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
         await db.commit()
         return {"ok": True}
@@ -257,13 +326,16 @@ async def delete_person(person_id: int, x_user_id: str = Header(...)):
 @app.post("/api/people/{person_id}/notes")
 async def add_note(person_id: int, note: Note, x_user_id: str = Header(...)):
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT id FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
-        if not await cursor.fetchone():
+        cursor = await db.execute("SELECT fio FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
+        row = await cursor.fetchone()
+        if not row:
             raise HTTPException(status_code=404)
         
         cursor = await db.execute("INSERT INTO person_notes (person_id, text) VALUES (?, ?)", (person_id, note.text))
+        note_id = cursor.lastrowid
+        await log_timeline(db, x_user_id, "note_added", "person", person_id, row[0], f"Добавлена заметка к {row[0]}")
         await db.commit()
-        return {"id": cursor.lastrowid}
+        return {"id": note_id}
 
 
 @app.delete("/api/people/{person_id}/notes/{note_id}")
@@ -297,8 +369,10 @@ async def create_knowledge(item: Knowledge, x_user_id: str = Header(...)):
             "INSERT INTO knowledge (user_id, title, content, tags, person_id) VALUES (?, ?, ?, ?, ?)",
             (x_user_id, item.title, item.content, json.dumps(item.tags, ensure_ascii=False), item.person_id)
         )
+        item_id = cursor.lastrowid
+        await log_timeline(db, x_user_id, "created", "knowledge", item_id, item.title)
         await db.commit()
-        return {"id": cursor.lastrowid}
+        return {"id": item_id}
 
 
 @app.patch("/api/knowledge/{item_id}")
@@ -312,6 +386,7 @@ async def update_knowledge(item_id: int, item: Knowledge, x_user_id: str = Heade
             "UPDATE knowledge SET title = ?, content = ?, tags = ?, person_id = ? WHERE id = ?",
             (item.title, item.content, json.dumps(item.tags, ensure_ascii=False), item.person_id, item_id)
         )
+        await log_timeline(db, x_user_id, "updated", "knowledge", item_id, item.title)
         await db.commit()
         return {"ok": True}
 
@@ -319,9 +394,103 @@ async def update_knowledge(item_id: int, item: Knowledge, x_user_id: str = Heade
 @app.delete("/api/knowledge/{item_id}")
 async def delete_knowledge(item_id: int, x_user_id: str = Header(...)):
     async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT title FROM knowledge WHERE id = ? AND user_id = ?", (item_id, x_user_id))
+        row = await cursor.fetchone()
+        if row:
+            await log_timeline(db, x_user_id, "deleted", "knowledge", item_id, row[0])
         await db.execute("DELETE FROM knowledge WHERE id = ? AND user_id = ?", (item_id, x_user_id))
         await db.commit()
         return {"ok": True}
+
+
+# === ИИ АССИСТЕНТ ===
+
+@app.get("/api/timeline")
+async def get_timeline(x_user_id: str = Header(...), limit: int = 50):
+    """Получить timeline событий."""
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM timeline WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (x_user_id, limit)
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+@app.post("/api/chat")
+async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
+    """Чат с ИИ-ассистентом, который знает все данные пользователя."""
+    
+    # Собираем контекст пользователя
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # Задачи
+        cursor = await db.execute(
+            "SELECT title, description, deadline, priority, done FROM tasks WHERE user_id = ?",
+            (x_user_id,)
+        )
+        tasks = [dict(r) for r in await cursor.fetchall()]
+        
+        # Люди
+        cursor = await db.execute(
+            "SELECT fio, data FROM people WHERE user_id = ?",
+            (x_user_id,)
+        )
+        people = []
+        for row in await cursor.fetchall():
+            p = {"fio": row["fio"]}
+            p.update(json.loads(row["data"]))
+            people.append(p)
+        
+        # Знания
+        cursor = await db.execute(
+            "SELECT title, content, tags FROM knowledge WHERE user_id = ?",
+            (x_user_id,)
+        )
+        knowledge = []
+        for row in await cursor.fetchall():
+            k = dict(row)
+            k["tags"] = json.loads(k["tags"])
+            knowledge.append(k)
+    
+    # Формируем системный промпт
+    system_prompt = f"""Ты — персональный ИИ-ассистент в приложении Hub. 
+Ты помогаешь пользователю управлять задачами, контактами и знаниями.
+
+ДАННЫЕ ПОЛЬЗОВАТЕЛЯ:
+
+📋 ЗАДАЧИ ({len(tasks)}):
+{json.dumps(tasks, ensure_ascii=False, indent=2) if tasks else "Нет задач"}
+
+👤 ЛЮДИ ({len(people)}):
+{json.dumps(people, ensure_ascii=False, indent=2) if people else "Нет контактов"}
+
+📚 БАЗА ЗНАНИЙ ({len(knowledge)}):
+{json.dumps(knowledge, ensure_ascii=False, indent=2) if knowledge else "Пусто"}
+
+ПРАВИЛА:
+- Отвечай кратко и по делу
+- Используй данные пользователя для персонализированных советов
+- Если спрашивают о человеке — ищи в контактах
+- Если спрашивают о задачах — анализируй приоритеты и дедлайны
+- Отвечай на русском языке
+- Будь полезным и проактивным"""
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gemini-pro",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": msg.message}
+            ],
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        return {"response": response.choices[0].message.content}
+    
+    except Exception as e:
+        return {"response": f"Ошибка ИИ: {str(e)}"}
 
 
 if __name__ == "__main__":

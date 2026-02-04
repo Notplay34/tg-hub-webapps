@@ -22,9 +22,34 @@ const API = {
             headers: { 'Content-Type': 'application/json', 'X-User-Id': userId }
         };
         if (data) options.body = JSON.stringify(data);
-        const response = await fetch(API_URL + endpoint, options);
-        if (!response.ok) throw new Error('API Error');
-        return await response.json();
+        
+        try {
+            const url = API_URL + endpoint;
+            console.log(`API Request: ${method} ${url}`, data);
+            
+            const response = await fetch(url, options);
+            
+            if (!response.ok) {
+                let errorText = '';
+                try {
+                    const errorData = await response.json();
+                    errorText = errorData.detail || errorData.message || JSON.stringify(errorData);
+                } catch {
+                    errorText = await response.text();
+                }
+                throw new Error(`HTTP ${response.status}: ${errorText || 'Ошибка сервера'}`);
+            }
+            
+            const result = await response.json();
+            console.log(`API Response:`, result);
+            return result;
+        } catch (e) {
+            console.error('API Error:', e);
+            if (e.name === 'TypeError' && e.message.includes('fetch')) {
+                throw new Error(`Нет соединения с сервером. Проверьте URL: ${API_URL}`);
+            }
+            throw e;
+        }
     }
 };
 
@@ -78,8 +103,19 @@ const Nav = {
         document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
         document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
         
-        document.getElementById(screenId).classList.add('active');
-        document.querySelector(`[data-screen="${screenId}"]`).classList.add('active');
+        const screen = document.getElementById(screenId);
+        if (screen) {
+            screen.classList.add('active');
+            const navBtn = document.querySelector(`[data-screen="${screenId}"]`);
+            if (navBtn) navBtn.classList.add('active');
+            
+            // Обновляем экраны при переходе
+            if (screenId === 'statsScreen') {
+                Today.render();
+            } else if (screenId === 'timelineScreen') {
+                Timeline.load();
+            }
+        }
     }
 };
 
@@ -88,25 +124,211 @@ let tasksData = [];
 let peopleData = [];
 let knowledgeData = [];
 
-async function loadAllData() {
+async function loadAllData(showLoading = true) {
+    if (showLoading) {
+        showLoadingState('tasks');
+        showLoadingState('people');
+        showLoadingState('knowledge');
+    }
+    
     try {
         [tasksData, peopleData, knowledgeData] = await Promise.all([
             API.request('GET', '/api/tasks'),
             API.request('GET', '/api/people'),
             API.request('GET', '/api/knowledge')
         ]);
+        
+        hideLoadingState('tasks');
+        hideLoadingState('people');
+        hideLoadingState('knowledge');
+        hideErrorState('tasks');
+        hideErrorState('people');
+        hideErrorState('knowledge');
+        
+        // Обновляем главный экран
+        Today.render();
     } catch (e) {
         console.error('Load error:', e);
+        hideLoadingState('tasks');
+        hideLoadingState('people');
+        hideLoadingState('knowledge');
+        showErrorState('tasks', e.message);
+        showErrorState('people', e.message);
+        showErrorState('knowledge', e.message);
     }
 }
+
+function showLoadingState(module) {
+    const el = document.getElementById(`${module}Loading`);
+    if (el) {
+        const list = document.getElementById(`${module}List`);
+        if (list) list.style.display = 'none';
+        const content = document.getElementById(`${module}Content`);
+        if (content) content.style.display = 'none';
+        document.getElementById(`${module}Empty`).classList.remove('show');
+        document.getElementById(`${module}Error`).classList.remove('show');
+        el.classList.add('show');
+    }
+}
+
+function hideLoadingState(module) {
+    const el = document.getElementById(`${module}Loading`);
+    if (el) el.classList.remove('show');
+    const list = document.getElementById(`${module}List`);
+    if (list) {
+        list.style.display = 'block';
+        const content = document.getElementById(`${module}Content`);
+        if (content) content.style.display = 'block';
+    }
+}
+
+function showErrorState(module, message) {
+    const el = document.getElementById(`${module}Error`);
+    if (el) {
+        el.querySelector('p').textContent = `❌ ${message}`;
+        el.classList.add('show');
+    }
+}
+
+function hideErrorState(module) {
+    const el = document.getElementById(`${module}Error`);
+    if (el) el.classList.remove('show');
+}
+
+// === ГЛАВНЫЙ ЭКРАН (ЗАДАЧИ НА СЕГОДНЯ) ===
+const Today = {
+    async render() {
+        const list = document.getElementById('todayList');
+        const empty = document.getElementById('todayEmpty');
+        
+        const today = Utils.today();
+        const items = tasksData.filter(t => !t.done && t.deadline === today);
+        
+        if (items.length === 0) {
+            list.innerHTML = '';
+            empty.classList.add('show');
+        } else {
+            empty.classList.remove('show');
+            list.innerHTML = items.map(t => Tasks.renderItem(t)).join('');
+            Tasks.initSwipe();
+        }
+    }
+};
+
+// === ГЛОБАЛЬНЫЙ ПОИСК ===
+const GlobalSearch = {
+    open() {
+        Nav.goto('searchScreen');
+        document.getElementById('globalSearchInput').focus();
+    },
+    
+    close() {
+        document.getElementById('globalSearchInput').value = '';
+        Nav.goto('statsScreen');
+    },
+    
+    search() {
+        const query = document.getElementById('globalSearchInput').value.toLowerCase().trim();
+        const results = document.getElementById('searchResults');
+        
+        if (!query) {
+            results.innerHTML = `
+                <div class="search-placeholder">
+                    <div class="search-placeholder-icon">🔍</div>
+                    <p>Введите запрос для поиска</p>
+                </div>
+            `;
+            return;
+        }
+        
+        let allResults = [];
+        
+        // Поиск в задачах
+        tasksData.forEach(t => {
+            if (t.title.toLowerCase().includes(query) || t.description?.toLowerCase().includes(query)) {
+                allResults.push({
+                    type: 'task',
+                    id: t.id,
+                    title: t.title,
+                    desc: t.description || '',
+                    icon: '📋',
+                    action: () => { Nav.goto('tasksScreen'); Tasks.openModal(t.id); }
+                });
+            }
+        });
+        
+        // Поиск в людях
+        peopleData.forEach(p => {
+            const data = p.data || {};
+            if (p.fio.toLowerCase().includes(query) || 
+                data.relation?.toLowerCase().includes(query) ||
+                data.workplace?.toLowerCase().includes(query)) {
+                allResults.push({
+                    type: 'person',
+                    id: p.id,
+                    title: p.fio,
+                    desc: data.relation || data.workplace || '',
+                    icon: '👤',
+                    action: () => { Nav.goto('peopleScreen'); People.openCard(p.id); }
+                });
+            }
+        });
+        
+        // Поиск в знаниях
+        knowledgeData.forEach(k => {
+            if (k.title.toLowerCase().includes(query) || k.content?.toLowerCase().includes(query)) {
+                allResults.push({
+                    type: 'knowledge',
+                    id: k.id,
+                    title: k.title,
+                    desc: k.content?.substring(0, 100) || '',
+                    icon: '📚',
+                    action: () => { Nav.goto('knowledgeScreen'); Knowledge.view(k.id); }
+                });
+            }
+        });
+        
+        if (allResults.length === 0) {
+            results.innerHTML = `
+                <div class="search-placeholder">
+                    <div class="search-placeholder-icon">🔍</div>
+                    <p>Ничего не найдено</p>
+                </div>
+            `;
+        } else {
+            results.innerHTML = allResults.map(r => `
+                <div class="search-result-item" data-type="${r.type}" onclick="GlobalSearch.select(${r.id}, '${r.type}')">
+                    <div class="search-result-header">
+                        <span class="search-result-type">${r.type === 'task' ? 'Задача' : (r.type === 'person' ? 'Человек' : 'Знание')}</span>
+                    </div>
+                    <div class="search-result-title">${Utils.escape(r.title)}</div>
+                    ${r.desc ? `<div class="search-result-desc">${Utils.escape(r.desc)}</div>` : ''}
+                </div>
+            `).join('');
+        }
+    },
+    
+    select(id, type) {
+        this.close();
+        setTimeout(() => {
+            if (type === 'task') Tasks.openModal(id);
+            else if (type === 'person') People.openCard(id);
+            else if (type === 'knowledge') Knowledge.view(id);
+        }, 300);
+    }
+};
 
 // === ЗАДАЧИ ===
 const Tasks = {
     filter: 'all',
+    sortBy: 'date', // date, priority, title
     
     async render() {
         const list = document.getElementById('tasksList');
         const empty = document.getElementById('tasksEmpty');
+        
+        hideLoadingState('tasks');
+        hideErrorState('tasks');
         
         let items = [...tasksData];
         const today = Utils.today();
@@ -119,15 +341,81 @@ const Tasks = {
             default: items = items.filter(t => !t.done);
         }
         
+        // Сортировка
+        items.sort((a, b) => {
+            if (this.sortBy === 'priority') {
+                const priorityOrder = {high: 3, medium: 2, low: 1};
+                return (priorityOrder[b.priority] || 2) - (priorityOrder[a.priority] || 2);
+            } else if (this.sortBy === 'title') {
+                return a.title.localeCompare(b.title, 'ru');
+            } else { // date
+                if (!a.deadline && !b.deadline) return 0;
+                if (!a.deadline) return 1;
+                if (!b.deadline) return -1;
+                return a.deadline.localeCompare(b.deadline);
+            }
+        });
+        
         if (items.length === 0) {
             list.innerHTML = '';
             empty.classList.add('show');
         } else {
             empty.classList.remove('show');
             list.innerHTML = items.map(t => this.renderItem(t)).join('');
+            this.initSwipe();
         }
         
         this.updatePersonSelect();
+        this.updateSortLabel();
+    },
+    
+    toggleSort() {
+        const sorts = ['date', 'priority', 'title'];
+        const currentIndex = sorts.indexOf(this.sortBy);
+        this.sortBy = sorts[(currentIndex + 1) % sorts.length];
+        this.render();
+    },
+    
+    updateSortLabel() {
+        const labels = {date: 'По дате', priority: 'По приоритету', title: 'По названию'};
+        document.getElementById('tasksSortLabel').textContent = labels[this.sortBy];
+    },
+    
+    initSwipe() {
+        document.querySelectorAll('#tasksList .card').forEach(card => {
+            let startX = 0;
+            let currentX = 0;
+            let isSwiping = false;
+            
+            card.addEventListener('touchstart', (e) => {
+                startX = e.touches[0].clientX;
+                isSwiping = true;
+            });
+            
+            card.addEventListener('touchmove', (e) => {
+                if (!isSwiping) return;
+                currentX = e.touches[0].clientX - startX;
+                if (currentX < 0) {
+                    card.style.transform = `translateX(${currentX}px)`;
+                    card.classList.add('swiping');
+                }
+            });
+            
+            card.addEventListener('touchend', () => {
+                if (currentX < -80) {
+                    card.classList.add('swiped');
+                    const taskId = parseInt(card.getAttribute('data-task-id'));
+                    setTimeout(() => {
+                        this.delete(taskId);
+                    }, 200);
+                } else {
+                    card.style.transform = '';
+                    card.classList.remove('swiping', 'swiped');
+                }
+                isSwiping = false;
+                currentX = 0;
+            });
+        });
     },
     
     renderItem(task) {
@@ -135,18 +423,35 @@ const Tasks = {
         const deadlineClass = task.deadline ? (task.deadline < today ? 'overdue' : (task.deadline === today ? 'today' : '')) : '';
         const person = task.person_id ? peopleData.find(p => p.id === task.person_id) : null;
         
+        const priorityIcons = {
+            high: '🔴',
+            medium: '🟡',
+            low: '🟢'
+        };
+        
+        const statusIcon = task.done ? '✅' : (task.deadline && task.deadline < today ? '⏰' : '📋');
+        
         return `
-            <div class="card ${task.done ? 'done' : ''}" onclick="Tasks.openModal(${task.id})">
+            <div class="card ${task.done ? 'done' : ''}" data-task-id="${task.id}" onclick="Tasks.openModal(${task.id})">
+                <button class="card-delete" onclick="event.stopPropagation();Tasks.delete(${task.id})" title="Удалить">×</button>
+                <div class="card-actions">
+                    <button class="card-action-btn" onclick="event.stopPropagation();Tasks.delete(${task.id})">🗑</button>
+                </div>
                 <div class="card-header">
                     <div class="card-checkbox" onclick="event.stopPropagation();Tasks.toggle(${task.id})"></div>
-                    <div class="card-body">
-                        <div class="card-title">${Utils.escape(task.title)}</div>
+                    <div class="card-body" style="flex:1">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                            <span style="font-size:18px">${statusIcon}</span>
+                            <div class="card-title" style="flex:1;margin:0">${Utils.escape(task.title)}</div>
+                        </div>
                         ${task.description ? `<div class="card-desc">${Utils.escape(task.description)}</div>` : ''}
                         <div class="card-meta">
+                            <span class="priority-badge ${task.priority || 'medium'}">
+                                ${priorityIcons[task.priority] || '🟡'} ${task.priority === 'high' ? 'Высокий' : (task.priority === 'low' ? 'Низкий' : 'Средний')}
+                            </span>
                             ${task.deadline ? `<span class="${deadlineClass}">📅 ${Utils.formatDate(task.deadline)}</span>` : ''}
-                            <span class="priority-badge ${task.priority || 'medium'}">${{high:'Высокий',medium:'Средний',low:'Низкий'}[task.priority] || 'Средний'}</span>
                         </div>
-                        ${person ? `<div class="linked-person"><span class="avatar small">${Utils.initials(person.fio)}</span>${Utils.escape(person.fio)}</div>` : ''}
+                        ${person ? `<div class="linked-person" style="margin-top:8px"><span class="avatar small">${Utils.initials(person.fio)}</span>${Utils.escape(person.fio)}</div>` : ''}
                     </div>
                 </div>
             </div>
@@ -202,7 +507,13 @@ const Tasks = {
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         } catch (e) {
-            alert('Ошибка сохранения');
+            console.error('Save error:', e);
+            const errorMsg = e.message || 'Ошибка сохранения';
+            if (tg?.showAlert) {
+                tg.showAlert(`Ошибка: ${errorMsg}`);
+            } else {
+                alert(`Ошибка сохранения: ${errorMsg}`);
+            }
         }
     },
     
@@ -218,22 +529,28 @@ const Tasks = {
         } catch (e) {}
     },
     
-    async delete() {
-        const id = document.getElementById('taskId').value;
-        if (!id) return;
+    async delete(id = null) {
+        const taskId = id || document.getElementById('taskId').value;
+        if (!taskId) return;
         
         const doDelete = async () => {
-            await API.request('DELETE', `/api/tasks/${id}`);
-            this.closeModal();
+            await API.request('DELETE', `/api/tasks/${taskId}`);
+            if (!id) this.closeModal();
             await loadAllData();
             this.render();
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         };
         
         if (tg?.showConfirm) {
             tg.showConfirm('Удалить задачу?', ok => { if (ok) doDelete(); });
-        } else if (confirm('Удалить?')) {
+        } else if (confirm('Удалить задачу?')) {
             doDelete();
         }
+    },
+    
+    async retry() {
+        await loadAllData();
+        this.render();
     },
     
     init() {
@@ -258,6 +575,9 @@ const People = {
         const list = document.getElementById('peopleList');
         const empty = document.getElementById('peopleEmpty');
         const search = document.getElementById('peopleSearch').value.toLowerCase();
+        
+        hideLoadingState('people');
+        hideErrorState('people');
         
         let items = [...peopleData];
         
@@ -284,7 +604,8 @@ const People = {
     renderItem(person) {
         const data = person.data || {};
         return `
-            <div class="person-item" onclick="People.openCard(${person.id})">
+            <div class="person-item" onclick="People.openCard(${person.id})" style="position:relative">
+                <button class="card-delete" onclick="event.stopPropagation();People.delete(${person.id})" title="Удалить" style="position:absolute;top:12px;right:12px">×</button>
                 <div class="avatar">${Utils.initials(person.fio)}</div>
                 <div class="person-info">
                     <h3>${Utils.escape(person.fio)}</h3>
@@ -359,7 +680,49 @@ const People = {
         }
         
         if (tasks.length) {
-            html += `<div class="card-section"><h4>Активные задачи</h4>${tasks.map(t => `<div class="card" onclick="Tasks.openModal(${t.id})"><div class="card-title">${Utils.escape(t.title)}</div></div>`).join('')}</div>`;
+            html += `
+                <div class="card-section">
+                    <h4>Активные задачи (${tasks.length})</h4>
+                    ${tasks.map(t => {
+                        const today = Utils.today();
+                        const deadlineClass = t.deadline ? (t.deadline < today ? 'overdue' : (t.deadline === today ? 'today' : '')) : '';
+                        return `
+                            <div class="card linked-task" onclick="Nav.goto('tasksScreen');Tasks.openModal(${t.id})" style="margin-bottom:8px;cursor:pointer">
+                                <div style="display:flex;align-items:center;gap:8px">
+                                    <span style="font-size:16px">${t.done ? '✅' : '📋'}</span>
+                                    <div style="flex:1">
+                                        <div class="card-title" style="margin:0;font-size:15px">${Utils.escape(t.title)}</div>
+                                        ${t.deadline ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px" class="${deadlineClass}">📅 ${Utils.formatDate(t.deadline)}</div>` : ''}
+                                    </div>
+                                    <span style="color:var(--accent);font-size:18px">→</span>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        }
+        
+        // Связанные знания
+        const relatedKnowledge = knowledgeData.filter(k => k.person_id === person.id);
+        if (relatedKnowledge.length) {
+            html += `
+                <div class="card-section">
+                    <h4>Связанные записи (${relatedKnowledge.length})</h4>
+                    ${relatedKnowledge.map(k => `
+                        <div class="card linked-knowledge" onclick="Nav.goto('knowledgeScreen');Knowledge.view(${k.id})" style="margin-bottom:8px;cursor:pointer">
+                            <div style="display:flex;align-items:center;gap:8px">
+                                <span style="font-size:16px">📚</span>
+                                <div style="flex:1">
+                                    <div class="card-title" style="margin:0;font-size:15px">${Utils.escape(k.title)}</div>
+                                    ${k.content ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px">${Utils.escape(k.content.substring(0, 60))}${k.content.length > 60 ? '...' : ''}</div>` : ''}
+                                </div>
+                                <span style="color:var(--accent);font-size:18px">→</span>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
         }
         
         html += `
@@ -474,25 +837,34 @@ const People = {
             
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         } catch (e) {
-            alert('Ошибка сохранения');
+            console.error('Save error:', e);
+            const errorMsg = e.message || 'Ошибка сохранения';
+            if (tg?.showAlert) {
+                tg.showAlert(`Ошибка: ${errorMsg}`);
+            } else {
+                alert(`Ошибка сохранения: ${errorMsg}`);
+            }
         }
     },
     
-    async delete() {
-        const id = document.getElementById('personId').value;
-        if (!id) return;
+    async delete(id = null) {
+        const personId = id || document.getElementById('personId').value;
+        if (!personId) return;
         
         const doDelete = async () => {
-            await API.request('DELETE', `/api/people/${id}`);
-            this.closeModal();
-            this.closeCard();
+            await API.request('DELETE', `/api/people/${personId}`);
+            if (!id) {
+                this.closeModal();
+                this.closeCard();
+            }
             await loadAllData();
             this.render();
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         };
         
         if (tg?.showConfirm) {
             tg.showConfirm('Удалить контакт?', ok => { if (ok) doDelete(); });
-        } else if (confirm('Удалить?')) {
+        } else if (confirm('Удалить контакт?')) {
             doDelete();
         }
     },
@@ -532,6 +904,11 @@ const People = {
         } else if (confirm('Удалить?')) {
             doDelete();
         }
+    },
+    
+    async retry() {
+        await loadAllData();
+        this.render();
     }
 };
 
@@ -545,6 +922,9 @@ const Knowledge = {
         const list = document.getElementById('knowledgeList');
         const empty = document.getElementById('knowledgeEmpty');
         const search = document.getElementById('knowledgeSearch').value.toLowerCase();
+        
+        hideLoadingState('knowledge');
+        hideErrorState('knowledge');
         
         let items = [...knowledgeData];
         
@@ -572,10 +952,17 @@ const Knowledge = {
         
         return `
             <div class="card" onclick="Knowledge.view(${item.id})">
+                <button class="card-delete" onclick="event.stopPropagation();Knowledge.delete(${item.id})" title="Удалить">×</button>
                 <div class="card-title">${Utils.escape(item.title)}</div>
                 ${item.content ? `<div class="card-desc">${Utils.escape(item.content)}</div>` : ''}
                 ${item.tags?.length ? `<div class="card-tags">${item.tags.map(t => `<span>${Utils.escape(t)}</span>`).join('')}</div>` : ''}
-                ${person ? `<div class="linked-person"><span class="avatar small">${Utils.initials(person.fio)}</span>${Utils.escape(person.fio)}</div>` : ''}
+                        ${person ? `
+                            <div class="linked-person" onclick="event.stopPropagation();People.openCard(${person.id})" style="cursor:pointer;margin-top:8px">
+                                <span class="avatar small">${Utils.initials(person.fio)}</span>
+                                <span style="font-weight:500">${Utils.escape(person.fio)}</span>
+                                <span style="margin-left:auto;color:var(--accent);font-size:12px">→</span>
+                            </div>
+                        ` : ''}
             </div>
         `;
     },
@@ -604,11 +991,25 @@ const Knowledge = {
         document.getElementById('knowledgeViewTitle').textContent = item.title;
         document.getElementById('knowledgeViewContent').textContent = item.content || '';
         
+        const person = item.person_id ? peopleData.find(p => p.id === item.person_id) : null;
+        
         let meta = '';
+        if (person) {
+            meta += `
+                <div class="linked-person-view" onclick="People.openCard(${person.id})" style="cursor:pointer;padding:12px;background:var(--bg-secondary);border-radius:12px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
+                    <span class="avatar">${Utils.initials(person.fio)}</span>
+                    <div style="flex:1">
+                        <div style="font-weight:600;font-size:14px">${Utils.escape(person.fio)}</div>
+                        <div style="font-size:12px;color:var(--text-secondary)">Связанный человек</div>
+                    </div>
+                    <span style="color:var(--accent);font-size:20px">→</span>
+                </div>
+            `;
+        }
         if (item.tags?.length) {
             meta += `<div class="tags">${item.tags.map(t => `<span>${Utils.escape(t)}</span>`).join('')}</div>`;
         }
-        meta += Utils.formatDateTime(item.created_at);
+        meta += `<div style="margin-top:12px;font-size:12px;color:var(--text-secondary)">${Utils.formatDateTime(item.created_at)}</div>`;
         document.getElementById('knowledgeViewMeta').innerHTML = meta;
         
         document.getElementById('knowledgeViewModal').classList.add('open');
@@ -620,8 +1021,10 @@ const Knowledge = {
     },
     
     editCurrent() {
-        this.closeView();
-        this.openModal(this.currentId);
+        const id = this.currentId; // Сохраняем ID перед закрытием
+        if (!id) return;
+        document.getElementById('knowledgeViewModal').classList.remove('open');
+        this.openModal(id); // Используем сохранённый ID
     },
     
     openModal(id = null) {
@@ -687,54 +1090,281 @@ const Knowledge = {
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         } catch (e) {
-            alert('Ошибка сохранения');
+            console.error('Save error:', e);
+            const errorMsg = e.message || 'Ошибка сохранения';
+            if (tg?.showAlert) {
+                tg.showAlert(`Ошибка: ${errorMsg}`);
+            } else {
+                alert(`Ошибка сохранения: ${errorMsg}`);
+            }
         }
     },
     
-    async delete() {
-        const id = document.getElementById('knowledgeId').value;
-        if (!id) return;
+    async delete(id = null) {
+        const itemId = id || document.getElementById('knowledgeId').value;
+        if (!itemId) return;
         
         const doDelete = async () => {
-            await API.request('DELETE', `/api/knowledge/${id}`);
-            this.closeModal();
+            await API.request('DELETE', `/api/knowledge/${itemId}`);
+            if (!id) this.closeModal();
             await loadAllData();
             this.render();
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         };
         
         if (tg?.showConfirm) {
             tg.showConfirm('Удалить запись?', ok => { if (ok) doDelete(); });
-        } else if (confirm('Удалить?')) {
+        } else if (confirm('Удалить запись?')) {
             doDelete();
         }
+    },
+    
+    async retry() {
+        await loadAllData();
+        this.render();
     }
 };
 
-// === ИИ (заглушка) ===
+// === TIMELINE ===
+const Timeline = {
+    data: [],
+    
+    async load() {
+        try {
+            this.data = await API.request('GET', '/api/timeline');
+            this.render();
+        } catch (e) {
+            console.error('Timeline load error:', e);
+        }
+    },
+    
+    render() {
+        const list = document.getElementById('timelineList');
+        const empty = document.getElementById('timelineEmpty');
+        
+        if (this.data.length === 0) {
+            list.innerHTML = '';
+            empty.classList.add('show');
+        } else {
+            empty.classList.remove('show');
+            list.innerHTML = this.data.map(item => this.renderItem(item)).join('');
+        }
+    },
+    
+    renderItem(item) {
+        const icons = {
+            created: '✨',
+            updated: '✏️',
+            deleted: '🗑️',
+            completed: '✅',
+            note_added: '📝'
+        };
+        
+        const actionLabels = {
+            created: 'Создано',
+            updated: 'Обновлено',
+            deleted: 'Удалено',
+            completed: 'Выполнено',
+            note_added: 'Заметка'
+        };
+        
+        const entityLabels = {
+            task: 'Задача',
+            person: 'Человек',
+            knowledge: 'Запись'
+        };
+        
+        const entityColors = {
+            task: 'var(--accent)',
+            person: 'var(--warning)',
+            knowledge: 'var(--success)'
+        };
+        
+        const action = actionLabels[item.action_type] || item.action_type;
+        const entity = entityLabels[item.entity_type] || item.entity_type;
+        const icon = icons[item.action_type] || '📋';
+        
+        let clickAction = '';
+        if (item.entity_type === 'task') {
+            clickAction = `onclick="Nav.goto('tasksScreen');Tasks.openModal(${item.entity_id})"`;
+        } else if (item.entity_type === 'person') {
+            clickAction = `onclick="Nav.goto('peopleScreen');People.openCard(${item.entity_id})"`;
+        } else if (item.entity_type === 'knowledge') {
+            clickAction = `onclick="Nav.goto('knowledgeScreen');Knowledge.view(${item.entity_id})"`;
+        }
+        
+        return `
+            <div class="timeline-item ${item.action_type}">
+                <div class="timeline-dot"></div>
+                <div class="timeline-card" ${clickAction}>
+                    <div class="timeline-header">
+                        <span class="timeline-icon">${icon}</span>
+                        <span class="timeline-action">${action}</span>
+                        <span style="color:${entityColors[item.entity_type]};font-weight:600;font-size:12px;margin-left:auto">${entity}</span>
+                    </div>
+                    <div class="timeline-title">${Utils.escape(item.entity_title || 'Без названия')}</div>
+                    ${item.details ? `<div class="timeline-details">${Utils.escape(item.details)}</div>` : ''}
+                    <div class="timeline-time">${Utils.formatDateTime(item.created_at)}</div>
+                </div>
+            </div>
+        `;
+    },
+    
+    async retry() {
+        await this.load();
+    }
+};
+
+// === ИИ АССИСТЕНТ ===
 const AI = {
-    send() {
+    isLoading: false,
+    
+    async send() {
         const input = document.getElementById('chatInput');
         const text = input.value.trim();
-        if (!text) return;
+        if (!text || this.isLoading) return;
         
         const messages = document.getElementById('chatMessages');
+        const welcome = document.querySelector('.chat-welcome');
+        if (welcome) welcome.style.display = 'none';
+        
+        // Сообщение пользователя
         messages.innerHTML += `<div class="chat-msg user">${Utils.escape(text)}</div>`;
         input.value = '';
         
-        // Заглушка ответа
-        setTimeout(() => {
-            messages.innerHTML += `<div class="chat-msg ai">ИИ-ассистент будет подключен в следующем обновлении. Пока я могу показать статистику:\n\n📋 Задач: ${tasksData.filter(t => !t.done).length} активных\n👤 Людей: ${peopleData.length}\n📚 Записей: ${knowledgeData.length}</div>`;
-            messages.scrollTop = messages.scrollHeight;
-        }, 500);
+        // Индикатор загрузки
+        this.isLoading = true;
+        const loadingId = Date.now();
+        messages.innerHTML += `<div class="chat-msg ai loading" id="loading-${loadingId}">⏳ Думаю...</div>`;
+        messages.scrollTop = messages.scrollHeight;
+        
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 минуты
+            
+            const response = await fetch(API_URL + '/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': userId
+                },
+                body: JSON.stringify({ message: text }),
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+            
+            const data = await response.json();
+            
+            // Убираем загрузку и показываем ответ
+            document.getElementById(`loading-${loadingId}`).remove();
+            messages.innerHTML += `<div class="chat-msg ai">${Utils.escape(data.response)}</div>`;
+            
+        } catch (e) {
+            document.getElementById(`loading-${loadingId}`).remove();
+            messages.innerHTML += `<div class="chat-msg ai">❌ Ошибка соединения</div>`;
+        }
+        
+        this.isLoading = false;
+        messages.scrollTop = messages.scrollHeight;
+        
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
     }
 };
+
+// === PULL-TO-REFRESH ===
+function initPullToRefresh(containerId, refreshFn) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    
+    let startY = 0;
+    let currentY = 0;
+    let isPulling = false;
+    const threshold = 80;
+    
+    container.addEventListener('touchstart', (e) => {
+        if (container.scrollTop === 0) {
+            startY = e.touches[0].clientY;
+            isPulling = true;
+        }
+    });
+    
+    container.addEventListener('touchmove', (e) => {
+        if (!isPulling) return;
+        
+        currentY = e.touches[0].clientY;
+        const pullDistance = currentY - startY;
+        
+        if (pullDistance > 0 && container.scrollTop === 0) {
+            e.preventDefault();
+            const pullRefresh = container.querySelector('.pull-refresh');
+            if (pullRefresh) {
+                const progress = Math.min(pullDistance / threshold, 1);
+                pullRefresh.style.top = `${20 + progress * 30}px`;
+                if (pullDistance > threshold) {
+                    pullRefresh.classList.add('active');
+                } else {
+                    pullRefresh.classList.remove('active');
+                }
+            }
+        }
+    });
+    
+    container.addEventListener('touchend', () => {
+        if (!isPulling) return;
+        
+        const pullRefresh = container.querySelector('.pull-refresh');
+        if (pullRefresh && pullRefresh.classList.contains('active')) {
+            refreshFn();
+        }
+        
+        if (pullRefresh) {
+            pullRefresh.style.top = '-50px';
+            pullRefresh.classList.remove('active');
+        }
+        
+        isPulling = false;
+    });
+}
 
 // === ИНИЦИАЛИЗАЦИЯ ===
 async function init() {
     Nav.init();
     Tasks.init();
     
+    // Pull-to-refresh
+    initPullToRefresh('todayContent', async () => {
+        await loadAllData();
+        Today.render();
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+    });
+    
+    initPullToRefresh('tasksContent', async () => {
+        await loadAllData();
+        Tasks.render();
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+    });
+    
+    initPullToRefresh('peopleContent', async () => {
+        await loadAllData();
+        People.render();
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+    });
+    
+    initPullToRefresh('knowledgeContent', async () => {
+        await loadAllData();
+        Knowledge.render();
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+    });
+    
+    initPullToRefresh('timelineContent', async () => {
+        await Timeline.load();
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+    });
+    
     await loadAllData();
+    await Timeline.load();
+    Today.render();
     Tasks.render();
     People.render();
     Knowledge.render();

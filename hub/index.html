@@ -9,12 +9,59 @@
 </head>
 <body>
     <div class="app">
+        <!-- ===== ГЛАВНЫЙ ЭКРАН ===== -->
+        <section class="screen active" id="statsScreen">
+            <header class="header">
+                <h1>YouHub</h1>
+                <button class="btn-icon" onclick="GlobalSearch.open()">🔍</button>
+            </header>
+            
+            <div class="header-subtitle">
+                <span>Задачи на сегодня</span>
+            </div>
+            
+            <main class="content" id="todayContent">
+                <div class="pull-refresh" id="todayPullRefresh">
+                    <div class="pull-refresh-icon">↓</div>
+                    <div>Потяните для обновления</div>
+                </div>
+                <div id="todayList"></div>
+            </main>
+            <div class="empty" id="todayEmpty">Нет задач на сегодня</div>
+        </section>
+
+        <!-- ===== ГЛОБАЛЬНЫЙ ПОИСК ===== -->
+        <section class="screen" id="searchScreen">
+            <header class="header">
+                <button class="btn-back" onclick="GlobalSearch.close()">←</button>
+                <h1>Поиск</h1>
+            </header>
+            
+            <div class="search-box-large">
+                <div class="search-icon">🔍</div>
+                <input type="text" id="globalSearchInput" placeholder="Поиск по задачам, людям, знаниям..." autofocus oninput="GlobalSearch.search()">
+            </div>
+            
+            <main class="content search-results" id="searchResults">
+                <div class="search-placeholder">
+                    <div class="search-placeholder-icon">🔍</div>
+                    <p>Введите запрос для поиска</p>
+                </div>
+            </main>
+        </section>
+
         <!-- ===== ЗАДАЧИ ===== -->
-        <section class="screen active" id="tasksScreen">
+        <section class="screen" id="tasksScreen">
             <header class="header">
                 <h1>Задачи</h1>
                 <button class="btn-icon" onclick="Tasks.openModal()">+</button>
             </header>
+            
+            <div class="header-actions">
+                <button class="btn-sort" onclick="Tasks.toggleSort()">
+                    Сортировка: <span id="tasksSortLabel">По дате</span> ▼
+                </button>
+            </div>
             
             <nav class="filters" id="tasksFilters">
                 <button class="filter active" data-filter="all">Все</button>
@@ -23,8 +70,19 @@
                 <button class="filter" data-filter="done">Готово</button>
             </nav>
             
-            <main class="content" id="tasksList"></main>
+            <main class="content" id="tasksContent">
+                <div class="pull-refresh" id="tasksPullRefresh">
+                    <div class="pull-refresh-icon">↓</div>
+                    <div>Потяните для обновления</div>
+                </div>
+                <div id="tasksList"></div>
+            </main>
             <div class="empty" id="tasksEmpty">Нет задач</div>
+            <div class="loading" id="tasksLoading">⏳ Загрузка...</div>
+            <div class="error" id="tasksError" style="display:none">
+                <p>❌ Ошибка загрузки</p>
+                <button onclick="Tasks.retry()">Повторить</button>
+            </div>
         </section>
 
         <!-- ===== ЛЮДИ ===== -->
@@ -40,8 +98,19 @@
             
             <nav class="filters" id="peopleFilters"></nav>
             
-            <main class="content" id="peopleList"></main>
+            <main class="content" id="peopleContent">
+                <div class="pull-refresh" id="peoplePullRefresh">
+                    <div class="pull-refresh-icon">↓</div>
+                    <div>Потяните для обновления</div>
+                </div>
+                <div id="peopleList"></div>
+            </main>
             <div class="empty" id="peopleEmpty">Картотека пуста</div>
+            <div class="loading" id="peopleLoading">⏳ Загрузка...</div>
+            <div class="error" id="peopleError" style="display:none">
+                <p>❌ Ошибка загрузки</p>
+                <button onclick="People.retry()">Повторить</button>
+            </div>
         </section>
 
         <!-- ===== КАРТОЧКА ЧЕЛОВЕКА ===== -->
@@ -67,8 +136,36 @@
             
             <nav class="filters" id="knowledgeFilters"></nav>
             
-            <main class="content" id="knowledgeList"></main>
+            <main class="content" id="knowledgeContent">
+                <div class="pull-refresh" id="knowledgePullRefresh">
+                    <div class="pull-refresh-icon">↓</div>
+                    <div>Потяните для обновления</div>
+                </div>
+                <div id="knowledgeList"></div>
+            </main>
             <div class="empty" id="knowledgeEmpty">База пуста</div>
+            <div class="loading" id="knowledgeLoading">⏳ Загрузка...</div>
+            <div class="error" id="knowledgeError" style="display:none">
+                <p>❌ Ошибка загрузки</p>
+                <button onclick="Knowledge.retry()">Повторить</button>
+            </div>
+        </section>
+
+        <!-- ===== TIMELINE ===== -->
+        <section class="screen" id="timelineScreen">
+            <header class="header">
+                <h1>Timeline</h1>
+            </header>
+            
+            <main class="content timeline-content" id="timelineContent">
+                <div class="pull-refresh" id="timelinePullRefresh">
+                    <div class="pull-refresh-icon">↓</div>
+                    <div>Потяните для обновления</div>
+                </div>
+                <div id="timelineList"></div>
+            </main>
+            <div class="empty" id="timelineEmpty">Нет событий</div>
+            <div class="loading" id="timelineLoading">⏳ Загрузка...</div>
         </section>
 
         <!-- ===== ИИ АССИСТЕНТ ===== -->
@@ -93,7 +190,11 @@
 
         <!-- ===== НАВИГАЦИЯ ===== -->
         <nav class="bottom-nav">
-            <button class="nav-item active" data-screen="tasksScreen">
+            <button class="nav-item active" data-screen="statsScreen">
+                <span class="nav-icon">🏠</span>
+                <span class="nav-label">Главная</span>
+            </button>
+            <button class="nav-item" data-screen="tasksScreen">
                 <span class="nav-icon">📋</span>
                 <span class="nav-label">Задачи</span>
             </button>
@@ -104,6 +205,10 @@
             <button class="nav-item" data-screen="knowledgeScreen">
                 <span class="nav-icon">📚</span>
                 <span class="nav-label">База</span>
+            </button>
+            <button class="nav-item" data-screen="timelineScreen">
+                <span class="nav-icon">📅</span>
+                <span class="nav-label">Timeline</span>
             </button>
             <button class="nav-item" data-screen="aiScreen">
                 <span class="nav-icon">🤖</span>
