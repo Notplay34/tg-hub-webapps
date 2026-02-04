@@ -57,9 +57,21 @@ const API = {
 const Utils = {
     today() { return new Date().toISOString().split('T')[0]; },
     
+    tomorrow() {
+        const d = new Date();
+        d.setDate(d.getDate() + 1);
+        return d.toISOString().split('T')[0];
+    },
+    
     weekFromNow() {
         const d = new Date();
         d.setDate(d.getDate() + 7);
+        return d.toISOString().split('T')[0];
+    },
+    
+    monthFromNow() {
+        const d = new Date();
+        d.setDate(d.getDate() + 30);
         return d.toISOString().split('T')[0];
     },
     
@@ -202,7 +214,8 @@ const Today = {
         const empty = document.getElementById('todayEmpty');
         
         const today = Utils.today();
-        const items = tasksData.filter(t => !t.done && t.deadline === today);
+        // Показываем задачи на сегодня + просроченные + без дедлайна
+        const items = tasksData.filter(t => !t.done && (!t.deadline || t.deadline <= today));
         
         if (items.length === 0) {
             list.innerHTML = '';
@@ -332,11 +345,16 @@ const Tasks = {
         
         let items = [...tasksData];
         const today = Utils.today();
+        const tomorrow = Utils.tomorrow();
         const week = Utils.weekFromNow();
+        
+        const month = Utils.monthFromNow();
         
         switch (this.filter) {
             case 'today': items = items.filter(t => !t.done && t.deadline === today); break;
+            case 'tomorrow': items = items.filter(t => !t.done && t.deadline === tomorrow); break;
             case 'week': items = items.filter(t => !t.done && t.deadline && t.deadline <= week); break;
+            case 'month': items = items.filter(t => !t.done && t.deadline && t.deadline <= month); break;
             case 'done': items = items.filter(t => t.done); break;
             default: items = items.filter(t => !t.done);
         }
@@ -382,7 +400,10 @@ const Tasks = {
     },
     
     initSwipe() {
-        document.querySelectorAll('#tasksList .card').forEach(card => {
+        document.querySelectorAll('#tasksList .card-swipe-wrapper, #todayList .card-swipe-wrapper').forEach(wrapper => {
+            const card = wrapper.querySelector('.card');
+            if (!card) return;
+            
             let startX = 0;
             let currentX = 0;
             let isSwiping = false;
@@ -390,27 +411,51 @@ const Tasks = {
             card.addEventListener('touchstart', (e) => {
                 startX = e.touches[0].clientX;
                 isSwiping = true;
+                wrapper.classList.remove('show-left', 'show-right');
             });
             
             card.addEventListener('touchmove', (e) => {
                 if (!isSwiping) return;
                 currentX = e.touches[0].clientX - startX;
-                if (currentX < 0) {
-                    card.style.transform = `translateX(${currentX}px)`;
-                    card.classList.add('swiping');
+                
+                card.style.transform = `translateX(${currentX}px)`;
+                card.classList.add('swiping');
+                
+                // Показываем нужный индикатор
+                if (currentX < -20) {
+                    wrapper.classList.add('show-left');
+                    wrapper.classList.remove('show-right');
+                } else if (currentX > 20) {
+                    wrapper.classList.add('show-right');
+                    wrapper.classList.remove('show-left');
+                } else {
+                    wrapper.classList.remove('show-left', 'show-right');
                 }
             });
             
             card.addEventListener('touchend', () => {
+                card.classList.remove('swiping'); // Включаем плавную анимацию
+                const taskId = parseInt(card.getAttribute('data-task-id'));
+                
+                // Свайп влево — удаление
                 if (currentX < -80) {
-                    card.classList.add('swiped');
-                    const taskId = parseInt(card.getAttribute('data-task-id'));
+                    card.style.transform = `translateX(-100%)`;
                     setTimeout(() => {
                         this.delete(taskId);
-                    }, 200);
-                } else {
+                    }, 250);
+                }
+                // Свайп вправо — выполнение
+                else if (currentX > 80) {
+                    card.style.transform = `translateX(100%)`;
+                    setTimeout(() => {
+                        this.toggle(taskId);
+                    }, 250);
+                }
+                else {
                     card.style.transform = '';
-                    card.classList.remove('swiping', 'swiped');
+                    setTimeout(() => {
+                        wrapper.classList.remove('show-left', 'show-right');
+                    }, 200);
                 }
                 isSwiping = false;
                 currentX = 0;
@@ -432,26 +477,27 @@ const Tasks = {
         const statusIcon = task.done ? '✅' : (task.deadline && task.deadline < today ? '⏰' : '📋');
         
         return `
-            <div class="card ${task.done ? 'done' : ''}" data-task-id="${task.id}" onclick="Tasks.openModal(${task.id})">
-                <button class="card-delete" onclick="event.stopPropagation();Tasks.delete(${task.id})" title="Удалить">×</button>
-                <div class="card-actions">
-                    <button class="card-action-btn" onclick="event.stopPropagation();Tasks.delete(${task.id})">🗑</button>
-                </div>
-                <div class="card-header">
-                    <div class="card-checkbox" onclick="event.stopPropagation();Tasks.toggle(${task.id})"></div>
-                    <div class="card-body" style="flex:1">
-                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-                            <span style="font-size:18px">${statusIcon}</span>
-                            <div class="card-title" style="flex:1;margin:0">${Utils.escape(task.title)}</div>
+            <div class="card-swipe-wrapper">
+                <div class="swipe-indicator swipe-indicator-right">✓</div>
+                <div class="swipe-indicator swipe-indicator-left">🗑</div>
+                <div class="card ${task.done ? 'done' : ''}" data-task-id="${task.id}" onclick="Tasks.openModal(${task.id})">
+                    <button class="card-delete" onclick="event.stopPropagation();Tasks.delete(${task.id})" title="Удалить">×</button>
+                    <div class="card-header">
+                        <div class="card-checkbox" onclick="event.stopPropagation();Tasks.toggle(${task.id})"></div>
+                        <div class="card-body" style="flex:1">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                                <span style="font-size:18px">${statusIcon}</span>
+                                <div class="card-title" style="flex:1;margin:0">${Utils.escape(task.title)}</div>
+                            </div>
+                            ${task.description ? `<div class="card-desc">${Utils.escape(task.description)}</div>` : ''}
+                            <div class="card-meta">
+                                <span class="priority-badge ${task.priority || 'medium'}">
+                                    ${priorityIcons[task.priority] || '🟡'} ${task.priority === 'high' ? 'Высокий' : (task.priority === 'low' ? 'Низкий' : 'Средний')}
+                                </span>
+                                ${task.deadline ? `<span class="${deadlineClass}">📅 ${Utils.formatDate(task.deadline)}</span>` : ''}
+                            </div>
+                            ${person ? `<div class="linked-person" style="margin-top:8px"><span class="avatar small">${Utils.initials(person.fio)}</span>${Utils.escape(person.fio)}</div>` : ''}
                         </div>
-                        ${task.description ? `<div class="card-desc">${Utils.escape(task.description)}</div>` : ''}
-                        <div class="card-meta">
-                            <span class="priority-badge ${task.priority || 'medium'}">
-                                ${priorityIcons[task.priority] || '🟡'} ${task.priority === 'high' ? 'Высокий' : (task.priority === 'low' ? 'Низкий' : 'Средний')}
-                            </span>
-                            ${task.deadline ? `<span class="${deadlineClass}">📅 ${Utils.formatDate(task.deadline)}</span>` : ''}
-                        </div>
-                        ${person ? `<div class="linked-person" style="margin-top:8px"><span class="avatar small">${Utils.initials(person.fio)}</span>${Utils.escape(person.fio)}</div>` : ''}
                     </div>
                 </div>
             </div>
@@ -1260,6 +1306,12 @@ const AI = {
             document.getElementById(`loading-${loadingId}`).remove();
             messages.innerHTML += `<div class="chat-msg ai">${Utils.escape(data.response)}</div>`;
             
+            // Если ИИ выполнил действие — обновляем данные
+            if (data.action_executed) {
+                await loadAllData(true); // Принудительное обновление
+                if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+            }
+            
         } catch (e) {
             document.getElementById(`loading-${loadingId}`).remove();
             messages.innerHTML += `<div class="chat-msg ai">❌ Ошибка соединения</div>`;
@@ -1269,6 +1321,31 @@ const AI = {
         messages.scrollTop = messages.scrollHeight;
         
         if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+    },
+    
+    async clearHistory() {
+        if (!confirm('Очистить историю диалога?')) return;
+        
+        try {
+            await fetch(API_URL + '/api/chat/history', {
+                method: 'DELETE',
+                headers: { 'X-User-Id': userId }
+            });
+            
+            // Очищаем UI
+            const messages = document.getElementById('chatMessages');
+            messages.innerHTML = `
+                <div class="chat-welcome">
+                    <div class="chat-welcome-icon">🤖</div>
+                    <p>Привет! Я твой ИИ-ассистент.</p>
+                    <p>Спроси меня о задачах, людях или знаниях.</p>
+                </div>
+            `;
+            
+            if (tg?.showAlert) tg.showAlert('История очищена');
+        } catch (e) {
+            console.error('Ошибка очистки истории:', e);
+        }
     }
 };
 

@@ -13,11 +13,16 @@
         <section class="screen active" id="statsScreen">
             <header class="header">
                 <h1>YouHub</h1>
-                <button class="btn-icon" onclick="GlobalSearch.open()">🔍</button>
             </header>
             
+            <div class="search-bar-fake" onclick="GlobalSearch.open()">
+                <span class="search-bar-icon">🔍</span>
+                <span class="search-bar-placeholder">Поиск...</span>
+            </div>
+            
             <div class="header-subtitle">
-                <span>Задачи на сегодня</span>
+                <span>Актуальные задачи</span>
+                <button class="btn-add-small" onclick="Tasks.openModal()">+</button>
             </div>
             
             <main class="content" id="todayContent">
@@ -66,7 +71,9 @@
             <nav class="filters" id="tasksFilters">
                 <button class="filter active" data-filter="all">Все</button>
                 <button class="filter" data-filter="today">Сегодня</button>
+                <button class="filter" data-filter="tomorrow">Завтра</button>
                 <button class="filter" data-filter="week">Неделя</button>
+                <button class="filter" data-filter="month">Месяц</button>
                 <button class="filter" data-filter="done">Готово</button>
             </nav>
             
@@ -172,6 +179,7 @@
         <section class="screen" id="aiScreen">
             <header class="header">
                 <h1>Ассистент</h1>
+                <button class="btn-icon" onclick="AI.clearHistory()" title="Очистить историю">🗑</button>
             </header>
             
             <main class="chat-container" id="chatContainer">
