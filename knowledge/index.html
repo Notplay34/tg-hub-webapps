@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>База знаний</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <h1>База знаний</h1>
+            <button class="btn-add" id="btnAdd">+</button>
+        </header>
+
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="Поиск...">
+        </div>
+
+        <nav class="tags-filter" id="tagsFilter">
+            <button class="tag-btn active" data-tag="all">Все</button>
+        </nav>
+
+        <main class="notes-list" id="notesList"></main>
+
+        <div class="empty" id="emptyState">
+            <p>База пуста</p>
+            <p class="hint">Нажмите + чтобы добавить запись</p>
+        </div>
+
+        <!-- Модал просмотра -->
+        <div class="modal" id="viewModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="viewTitle">Заголовок</h2>
+                    <button class="modal-close" id="viewClose">×</button>
+                </div>
+                <div class="view-content" id="viewContent"></div>
+                <div class="view-tags" id="viewTags"></div>
+                <div class="view-date" id="viewDate"></div>
+                <div class="view-actions">
+                    <button class="btn-edit" id="btnEdit">Редактировать</button>
+                    <button class="btn-delete" id="btnDelete">Удалить</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Модал редактирования -->
+        <div class="modal" id="editModal">
+            <div class="modal-content modal-full">
+                <div class="modal-header">
+                    <button class="modal-close" id="editClose">×</button>
+                    <h2 id="editTitle">Новая запись</h2>
+                    <button class="btn-save" id="btnSave">✓</button>
+                </div>
+                <form id="noteForm">
+                    <input type="hidden" id="noteId">
+                    
+                    <div class="form-group">
+                        <label>Заголовок *</label>
+                        <input type="text" id="title" required placeholder="Название записи">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Содержание</label>
+                        <textarea id="content" rows="8" placeholder="Текст, ссылки, заметки..."></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Теги</label>
+                        <div class="tags-input" id="tagsInput">
+                            <div class="tags-list" id="tagsList"></div>
+                            <input type="text" id="tagInput" placeholder="Добавить тег...">
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

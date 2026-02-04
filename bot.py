@@ -10,7 +10,7 @@ from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from config import BOT_TOKEN, WEBAPP_TASKS_URL, WEBAPP_PEOPLE_URL
+from config import BOT_TOKEN, WEBAPP_TASKS_URL, WEBAPP_PEOPLE_URL, WEBAPP_KNOWLEDGE_URL
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -25,7 +25,7 @@ dp = Dispatcher()
 
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
-    """Главное меню с Web App."""
+    """Главное меню с Web Apps."""
     # Кнопка Список дел
     if WEBAPP_TASKS_URL:
         tasks_btn = KeyboardButton(
@@ -44,9 +44,18 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     else:
         people_btn = KeyboardButton(text="👤 Картотека")
     
+    # Кнопка База знаний
+    if WEBAPP_KNOWLEDGE_URL:
+        knowledge_btn = KeyboardButton(
+            text="📚 База знаний",
+            web_app=WebAppInfo(url=WEBAPP_KNOWLEDGE_URL)
+        )
+    else:
+        knowledge_btn = KeyboardButton(text="📚 База знаний")
+    
     buttons = [
         [tasks_btn],
-        [people_btn, KeyboardButton(text="📚 База знаний")]
+        [people_btn, knowledge_btn]
     ]
     
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
@@ -55,49 +64,30 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     """Команда /start."""
-    notes = []
-    if not WEBAPP_TASKS_URL:
-        notes.append("WEBAPP_TASKS_URL")
-    if not WEBAPP_PEOPLE_URL:
-        notes.append("WEBAPP_PEOPLE_URL")
-    
-    webapp_note = ""
-    if notes:
-        webapp_note = f"\n\n<i>⚠️ Не настроено: {', '.join(notes)}</i>"
-    
     await message.answer(
         "⚡ <b>Hub</b>\n\n"
         "Всё важное — в одном месте.\n"
-        "Люди, задачи, знания — под контролем." + webapp_note,
+        "Люди, задачи, знания — под контролем.",
         reply_markup=get_main_keyboard()
     )
 
 
 @dp.message(F.text == "👤 Картотека")
 async def msg_people(message: Message):
-    """Картотека — если Web App не настроен."""
-    await message.answer(
-        "👤 <b>Картотека</b>\n\n"
-        "Настройте WEBAPP_PEOPLE_URL в .env"
-    )
+    """Картотека — fallback."""
+    await message.answer("👤 <b>Картотека</b>\n\nНастройте WEBAPP_PEOPLE_URL")
 
 
 @dp.message(F.text == "📚 База знаний")
 async def msg_knowledge(message: Message):
-    """База знаний — заглушка."""
-    await message.answer(
-        "📚 <b>База знаний</b>\n\n"
-        "<i>Модуль в разработке</i>"
-    )
+    """База знаний — fallback."""
+    await message.answer("📚 <b>База знаний</b>\n\nНастройте WEBAPP_KNOWLEDGE_URL")
 
 
 @dp.message(F.text == "📋 Список дел")
-async def msg_tasks_fallback(message: Message):
-    """Список дел — если Web App не настроен."""
-    await message.answer(
-        "📋 <b>Список дел</b>\n\n"
-        "Настройте WEBAPP_TASKS_URL в .env"
-    )
+async def msg_tasks(message: Message):
+    """Список дел — fallback."""
+    await message.answer("📋 <b>Список дел</b>\n\nНастройте WEBAPP_TASKS_URL")
 
 
 async def main():

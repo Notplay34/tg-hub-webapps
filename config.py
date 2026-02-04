@@ -13,3 +13,4 @@ if not BOT_TOKEN:
 # URL Web Apps (должны быть HTTPS)
 WEBAPP_TASKS_URL = os.getenv("WEBAPP_TASKS_URL", "")
 WEBAPP_PEOPLE_URL = os.getenv("WEBAPP_PEOPLE_URL", "")
+WEBAPP_KNOWLEDGE_URL = os.getenv("WEBAPP_KNOWLEDGE_URL", "")
