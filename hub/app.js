@@ -30,12 +30,17 @@ const API = {
             const response = await fetch(url, options);
             
             if (!response.ok) {
+                const clone = response.clone();
                 let errorText = '';
                 try {
-                    const errorData = await response.json();
+                    const errorData = await clone.json();
                     errorText = errorData.detail || errorData.message || JSON.stringify(errorData);
                 } catch {
-                    errorText = await response.text();
+                    try {
+                        errorText = await clone.text();
+                    } catch {
+                        errorText = '';
+                    }
                 }
                 throw new Error(`HTTP ${response.status}: ${errorText || 'Ошибка сервера'}`);
             }
@@ -513,12 +518,6 @@ const Tasks = {
             peopleData.map(p => `<option value="${p.id}">${Utils.escape(p.fio)}</option>`).join('');
     },
     
-    toggleReminderField() {
-        const wrap = document.getElementById('taskReminderTimeWrap');
-        const cb = document.getElementById('taskReminder');
-        wrap.style.display = cb.checked ? 'block' : 'none';
-    },
-    
     openModal(id = null) {
         const modal = document.getElementById('taskModal');
         const task = id ? tasksData.find(t => t.id === id) : null;
@@ -532,10 +531,15 @@ const Tasks = {
         document.getElementById('taskPerson').value = task?.person_id || '';
         document.getElementById('taskDelete').style.display = task ? 'block' : 'none';
         
-        const reminderEnabled = task?.reminder_enabled || false;
-        document.getElementById('taskReminder').checked = reminderEnabled;
-        document.getElementById('taskReminderTime').value = task?.reminder_time || '09:00';
-        this.toggleReminderField();
+        const recurrence = task?.recurrence_type || 'none';
+        document.getElementById('taskRecurrence').value = recurrence;
+        
+        const reminderSelect = document.getElementById('taskReminderSelect');
+        if (task?.reminder_enabled && task.reminder_time) {
+            reminderSelect.value = task.reminder_time;
+        } else {
+            reminderSelect.value = 'none';
+        }
         
         modal.classList.add('open');
     },
@@ -546,18 +550,24 @@ const Tasks = {
     
     async save() {
         const id = document.getElementById('taskId').value;
-        const reminderEnabled = document.getElementById('taskReminder').checked;
+        const reminderValue = document.getElementById('taskReminderSelect').value;
+        const recurrenceValue = document.getElementById('taskRecurrence').value;
+        const deadlineValue = document.getElementById('taskDeadline').value || null;
         const data = {
             title: document.getElementById('taskTitle').value.trim(),
             description: document.getElementById('taskDesc').value.trim(),
-            deadline: document.getElementById('taskDeadline').value || null,
+            deadline: deadlineValue,
             priority: document.getElementById('taskPriority').value,
             person_id: parseInt(document.getElementById('taskPerson').value) || null,
-            reminder_enabled: reminderEnabled,
-            reminder_time: reminderEnabled ? document.getElementById('taskReminderTime').value : null
+            reminder_enabled: reminderValue !== 'none',
+            reminder_time: reminderValue !== 'none' ? reminderValue : null,
+            recurrence_type: recurrenceValue || 'none'
         };
         
         if (!data.title) return alert('Введите название');
+        if (data.recurrence_type !== 'none' && !deadlineValue) {
+            return (tg?.showAlert ? tg.showAlert('Для повторяющейся задачи нужно указать дедлайн.') : alert('Для повторяющейся задачи нужно указать дедлайн.'));
+        }
         
         try {
             if (id) {
@@ -1281,69 +1291,6 @@ const Timeline = {
 // === ИИ АССИСТЕНТ ===
 const AI = {
     isLoading: false,
-    isListening: false,
-    recognition: null,
-    
-    initVoice() {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) return false;
-        this.recognition = new SpeechRecognition();
-        this.recognition.continuous = false;
-        this.recognition.lang = 'ru-RU';
-        this.recognition.interimResults = false;
-        
-        this.recognition.onresult = (e) => {
-            const text = e.results[0][0].transcript;
-            const input = document.getElementById('chatInput');
-            input.value = (input.value ? input.value + ' ' : '') + text;
-            this.isListening = false;
-            this.updateMicButton();
-            if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
-        };
-        
-        this.recognition.onend = () => {
-            this.isListening = false;
-            this.updateMicButton();
-        };
-        
-        this.recognition.onerror = (e) => {
-            this.isListening = false;
-            this.updateMicButton();
-            if (e.error !== 'aborted' && tg?.showAlert) tg.showAlert('Не удалось распознать речь. Попробуйте ещё раз.');
-        };
-        
-        return true;
-    },
-    
-    updateMicButton() {
-        const btn = document.getElementById('btnMic');
-        if (!btn) return;
-        btn.classList.toggle('recording', this.isListening);
-        btn.title = this.isListening ? 'Остановить' : 'Голосом';
-    },
-    
-    toggleVoice() {
-        if (this.isLoading) return;
-        
-        if (!this.recognition && !this.initVoice()) {
-            if (tg?.showAlert) tg.showAlert('Голосовой ввод не поддерживается в этом браузере.');
-            return;
-        }
-        
-        if (this.isListening) {
-            this.recognition.abort();
-            return;
-        }
-        
-        this.isListening = true;
-        this.updateMicButton();
-        try {
-            this.recognition.start();
-        } catch (e) {
-            this.isListening = false;
-            this.updateMicButton();
-        }
-    },
     
     async send() {
         const input = document.getElementById('chatInput');

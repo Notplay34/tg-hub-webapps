@@ -95,19 +95,29 @@ async def send_reminders_by_time():
     now = datetime.now()
     today = now.date().isoformat()
     time_str = now.strftime("%H:%M")
+    tomorrow = (now.date() + timedelta(days=1)).isoformat()
+    before_key = f"before_{time_str}"
     
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            """SELECT user_id, title, reminder_time FROM tasks 
-               WHERE deadline = ? AND done = 0 AND reminder_enabled = 1 AND reminder_time = ?""",
-            (today, time_str)
+            """SELECT user_id, title, reminder_time, deadline FROM tasks 
+               WHERE done = 0 AND reminder_enabled = 1
+                     AND (
+                         (deadline = ? AND reminder_time = ?)
+                         OR
+                         (deadline = ? AND reminder_time = ?)
+                     )""",
+            (today, time_str, tomorrow, before_key)
         )
         rows = await cursor.fetchall()
     
     for row in rows:
         try:
-            text = f"⏰ <b>Напоминание</b>\n\n{row['title']}"
+            if row["deadline"] == today:
+                text = f"⏰ <b>Напоминание на сегодня</b>\n\n{row['title']}"
+            else:
+                text = f"⏰ <b>Напоминание: завтра срок</b>\n\n{row['title']}"
             await bot.send_message(int(row['user_id']), text)
             logger.info(f"Напоминание по времени отправлено {row['user_id']}: {row['title']}")
         except Exception as e:

@@ -191,8 +191,7 @@
             </main>
             
             <div class="chat-input-container">
-                <button class="btn-mic" id="btnMic" onclick="AI.toggleVoice()" title="Голосом">🎤</button>
-                <input type="text" id="chatInput" placeholder="Спросить или нажать 🎤..." onkeydown="if(event.key==='Enter')AI.send()">
+                <input type="text" id="chatInput" placeholder="Спросить..." onkeydown="if(event.key==='Enter')AI.send()">
                 <button class="btn-send" onclick="AI.send()">→</button>
             </div>
         </section>
@@ -263,14 +262,28 @@
                             <option value="">— Не выбрано —</option>
                         </select>
                     </div>
+                    <div class="form-group repeat-row">
+                        <label for="taskRecurrence">🔁 Повтор</label>
+                        <div class="repeat-select-wrap">
+                            <select id="taskRecurrence">
+                                <option value="none">Не повторять</option>
+                                <option value="daily">Каждый день</option>
+                                <option value="weekly">Каждую неделю</option>
+                                <option value="monthly">Каждый месяц</option>
+                            </select>
+                        </div>
+                    </div>
                     <div class="form-group reminder-row">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="taskReminder" onchange="Tasks.toggleReminderField()">
-                            <span>🔔 Напоминание</span>
-                        </label>
-                        <div class="reminder-time-wrap" id="taskReminderTimeWrap" style="display:none;margin-top:10px">
-                            <label>Во сколько напомнить</label>
-                            <input type="time" id="taskReminderTime" value="09:00" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);font-size:16px">
+                        <label for="taskReminderSelect">🔔 Напоминание</label>
+                        <div class="reminder-time-wrap" id="taskReminderTimeWrap">
+                            <select id="taskReminderSelect">
+                                <option value="none">Не напоминать</option>
+                                <option value="09:00">В день в 09:00</option>
+                                <option value="12:00">В день в 12:00</option>
+                                <option value="18:00">В день в 18:00</option>
+                                <option value="21:00">В день в 21:00</option>
+                                <option value="before_09:00">За день до в 09:00</option>
+                            </select>
                         </div>
                     </div>
                 </form>

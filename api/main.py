@@ -67,6 +67,7 @@ class Task(BaseModel):
     person_id: Optional[int] = None
     reminder_enabled: bool = False
     reminder_time: Optional[str] = None
+    recurrence_type: str = "none"  # none, daily, weekly, monthly
 
 
 class TaskUpdate(BaseModel):
@@ -77,6 +78,8 @@ class TaskUpdate(BaseModel):
     done: Optional[bool] = None
     person_id: Optional[int] = None
     reminder_enabled: Optional[bool] = None
+    reminder_time: Optional[str] = None
+    recurrence_type: Optional[str] = None
     reminder_time: Optional[str] = None
 
 
@@ -127,6 +130,7 @@ async def init_db():
                 person_id INTEGER,
                 reminder_enabled INTEGER DEFAULT 0,
                 reminder_time TEXT,
+                recurrence_type TEXT DEFAULT 'none',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -138,6 +142,10 @@ async def init_db():
             pass
         try:
             await db.execute("ALTER TABLE tasks ADD COLUMN reminder_time TEXT")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE tasks ADD COLUMN recurrence_type TEXT DEFAULT 'none'")
         except:
             pass
         
@@ -247,11 +255,28 @@ async def get_tasks(x_user_id: str = Header(...)):
 @app.post("/api/tasks")
 async def create_task(task: Task, x_user_id: str = Header(...)):
     try:
+        # Валидация: повторяющиеся задачи без дедлайна запрещаем
+        if task.recurrence_type and task.recurrence_type != "none" and not task.deadline:
+            raise HTTPException(
+                status_code=400,
+                detail="Для повторяющейся задачи нужно указать дедлайн.",
+            )
         async with aiosqlite.connect(DATABASE) as db:
             cursor = await db.execute(
-                """INSERT INTO tasks (user_id, title, description, deadline, priority, done, person_id, reminder_enabled, reminder_time)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (x_user_id, task.title, task.description, task.deadline, task.priority, int(task.done), task.person_id, int(task.reminder_enabled), task.reminder_time)
+                """INSERT INTO tasks (user_id, title, description, deadline, priority, done, person_id, reminder_enabled, reminder_time, recurrence_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    x_user_id,
+                    task.title,
+                    task.description,
+                    task.deadline,
+                    task.priority,
+                    int(task.done),
+                    task.person_id,
+                    int(task.reminder_enabled),
+                    task.reminder_time,
+                    task.recurrence_type or "none",
+                )
             )
             task_id = cursor.lastrowid
             await log_timeline(db, x_user_id, "created", "task", task_id, task.title)
@@ -264,36 +289,139 @@ async def create_task(task: Task, x_user_id: str = Header(...)):
 @app.patch("/api/tasks/{task_id}")
 async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(...)):
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT title, done FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id))
+        cursor = await db.execute(
+            """
+            SELECT title, description, deadline, priority, done, person_id,
+                   reminder_enabled, reminder_time, recurrence_type
+            FROM tasks
+            WHERE id = ? AND user_id = ?
+            """,
+            (task_id, x_user_id)
+        )
         row = await cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404)
         
-        old_done = row[1]
-        task_title = row[0]
+        # Текущее состояние до обновления
+        cur_title = row[0]
+        cur_description = row[1]
+        cur_deadline = row[2]
+        cur_priority = row[3]
+        old_done = row[4]
+        cur_person_id = row[5]
+        cur_reminder_enabled = row[6]
+        cur_reminder_time = row[7]
+        cur_recurrence_type = row[8] or "none"
         
-        updates = []
+        updates: list[str] = []
         values = []
         data = task.dict(exclude_unset=True)
         action_type = "updated"
         
+        # Валидация: если меняем recurrence_type, но после обновления у задачи не будет дедлайна — ошибка
+        if "recurrence_type" in data:
+            new_recur = data["recurrence_type"] or "none"
+            new_deadline = data.get("deadline", cur_deadline)
+            if new_recur != "none" and not new_deadline:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Для повторяющейся задачи нужно указать дедлайн.",
+                )
+        
         for field, value in data.items():
-            if field == 'done':
+            if field == "done":
                 updates.append("done = ?")
                 values.append(int(value))
                 if value and not old_done:
                     action_type = "completed"
-            elif field == 'reminder_enabled':
+            elif field == "title":
+                updates.append("title = ?")
+                values.append(value)
+                cur_title = value
+            elif field == "description":
+                updates.append("description = ?")
+                values.append(value)
+                cur_description = value
+            elif field == "deadline":
+                updates.append("deadline = ?")
+                values.append(value)
+                cur_deadline = value
+            elif field == "priority":
+                updates.append("priority = ?")
+                values.append(value)
+                cur_priority = value
+            elif field == "person_id":
+                updates.append("person_id = ?")
+                values.append(value)
+                cur_person_id = value
+            elif field == "reminder_enabled":
                 updates.append("reminder_enabled = ?")
                 values.append(int(bool(value)))
-            elif value is not None or field == 'person_id':
-                updates.append(f"{field} = ?")
+                cur_reminder_enabled = int(bool(value))
+            elif field == "reminder_time":
+                updates.append("reminder_time = ?")
                 values.append(value)
+                cur_reminder_time = value
+            elif field == "recurrence_type":
+                updates.append("recurrence_type = ?")
+                values.append(value or "none")
+                cur_recurrence_type = value or "none"
         
         if updates:
             values.append(task_id)
             await db.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", values)
-            await log_timeline(db, x_user_id, action_type, "task", task_id, task_title)
+            await log_timeline(db, x_user_id, action_type, "task", task_id, cur_title)
+            
+            # Если задача только что была завершена и у неё есть повторение — создаём следующую
+            if "done" in data and data["done"] and not old_done and cur_deadline and cur_recurrence_type != "none":
+                try:
+                    from datetime import date
+                    import calendar
+                    
+                    d = date.fromisoformat(cur_deadline)
+                    if cur_recurrence_type == "daily":
+                        new_date = d + timedelta(days=1)
+                    elif cur_recurrence_type == "weekly":
+                        new_date = d + timedelta(weeks=1)
+                    elif cur_recurrence_type == "monthly":
+                        year = d.year
+                        month = d.month + 1
+                        if month > 12:
+                            month = 1
+                            year += 1
+                        # безопасно подбираем день
+                        last_day = calendar.monthrange(year, month)[1]
+                        day = min(d.day, last_day)
+                        new_date = date(year, month, day)
+                    else:
+                        new_date = None
+                    
+                    if new_date:
+                        await db.execute(
+                            """
+                            INSERT INTO tasks (
+                                user_id, title, description, deadline, priority,
+                                done, person_id, reminder_enabled, reminder_time, recurrence_type
+                            )
+                            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                            """,
+                            (
+                                x_user_id,
+                                cur_title,
+                                cur_description,
+                                new_date.isoformat(),
+                                cur_priority,
+                                cur_person_id,
+                                cur_reminder_enabled,
+                                cur_reminder_time,
+                                cur_recurrence_type,
+                            )
+                        )
+                except Exception as e:
+                    # Логируем, но не ломаем основной запрос
+                    import logging
+                    logging.getLogger(__name__).error(f"Failed to create recurring task: {e}")
+            
             await db.commit()
         
         return {"ok": True}
@@ -477,7 +605,12 @@ logger = logging.getLogger(__name__)
 
 def parse_user_command(message: str, user_id: str):
     """Парсит команды пользователя напрямую, без ИИ."""
+    # Очищаем от лишнего шума: эмодзи, повторяющихся пробелов
+    # Оригинал используем для логирования при необходимости
     msg_lower = message.lower().strip()
+    # Убираем простые эмодзи и лишние символы, чтобы не попадали в заголовки задач
+    msg_lower = re.sub(r'[^\w\s\.\,\-\:\;\!\?ёа-я0-9]', ' ', msg_lower)
+    msg_lower = re.sub(r'\s+', ' ', msg_lower).strip()
     logger.info(f"Parsing message: {msg_lower}")
     
     # Создать задачу
@@ -565,8 +698,16 @@ def parse_user_command(message: str, user_id: str):
                         # По умолчанию - сегодня
                         deadline = datetime.now().date().isoformat()
             
-            # Убираем слова про дату из названия
-            title_clean = re.sub(r'\s*(на завтра|на сегодня|на послезавтра|завтра|сегодня|срочно|важно)\s*', ' ', title).strip()
+            # Убираем слова про дату и служебные слова из названия
+            title_clean = re.sub(
+                r'\b(на завтра|на сегодня|на послезавтра|завтра|сегодня|срочно|важно|пожалуйста|плиз|плииз)\b',
+                ' ',
+                title,
+                flags=re.IGNORECASE,
+            ).strip()
+            # Если после чистки заголовок слишком длинный — обрежем
+            if len(title_clean) > 120:
+                title_clean = title_clean[:117].rstrip() + '...'
             
             priority = "medium"
             if 'срочно' in msg_lower or 'важно' in msg_lower:
@@ -595,18 +736,21 @@ def parse_user_command(message: str, user_id: str):
                 "title": match.group(1).strip()
             }
     
-    # Создать контакт/карточку
+    # Создать контакт/карточку (явные фразы)
     person_patterns = [
         r'создай карточку[:\s]+(.+)',
+        r'создай контакт[:\s]+(.+)',
         r'добавь контакт[:\s]+(.+)',
         r'добавь человека[:\s]+(.+)',
+        r'добавь карточку[:\s]+(.+)',
         r'новый контакт[:\s]+(.+)',
+        r'запиши контакт[:\s]+(.+)',
         r'карточка[:\s]+(.+)',
     ]
     
-    # Проверяем, похоже ли на ФИО с датой рождения
-    # "добавь иванов иван 01.01.1990 ..."
-    fio_pattern = r'добавь\s+([а-яё]+\s+[а-яё]+(?:\s+[а-яё]+)?)\s+(\d{1,2}\.\d{1,2}\.\d{4})\s*(.*)'
+    # Проверяем, похоже ли на ФИО с датой рождения (2–4 слова: Фамилия Имя Отчество)
+    # "добавь иванов иван иванович 01.01.1990 ..."
+    fio_pattern = r'добавь\s+([а-яё]+\s+[а-яё]+(?:\s+[а-яё]+){0,2})\s+(\d{1,2}\.\d{1,2}\.\d{4})\s*(.*)'
     fio_match = re.search(fio_pattern, msg_lower)
     if fio_match:
         fio = fio_match.group(1).strip()
@@ -639,9 +783,9 @@ def parse_user_command(message: str, user_id: str):
             **data
         }
     
-    # ФИО без даты рождения (минимум 2 слова + характеристики)
-    # "добавь иванов иван мама, директор, умный"
-    fio_no_date = r'добавь\s+([а-яё]+\s+[а-яё]+(?:\s+[а-яё]+)?)\s+(.+)'
+    # ФИО без даты (2–4 слова + роль/характеристики)
+    # "добавь иванов иван мама, директор" или "добавь албегова наталья сергеевна мама, компаньон"
+    fio_no_date = r'добавь\s+([а-яё]+\s+[а-яё]+(?:\s+[а-яё]+){0,2})\s+(.+)'
     fio_match2 = re.search(fio_no_date, msg_lower)
     if fio_match2:
         fio = fio_match2.group(1).strip()
@@ -664,8 +808,8 @@ def parse_user_command(message: str, user_id: str):
                                'ленивый', 'ленива', 'жадный', 'жадная', 'нервный', 'нервная',
                                'непунктуальный', 'непунктуальна', 'необязательный', 'необязательна']
             
-            # Разбиваем по запятым или пробелам
-            if ',' in rest:
+            # Разбиваем по запятым (блоки смысла)
+            if ',' in rest or ';' in rest:
                 words = [w.strip() for w in re.split(r'[,;]', rest) if w.strip()]
             else:
                 words = rest.split()
@@ -686,7 +830,7 @@ def parse_user_command(message: str, user_id: str):
                     strengths.append(word)
             
             if found_roles:
-                data['role'] = ', '.join(found_roles)
+                data['relation'] = ', '.join(found_roles)
             if strengths:
                 data['strengths'] = ', '.join(strengths)
             if weaknesses:
@@ -748,6 +892,46 @@ def parse_user_command(message: str, user_id: str):
                 **data
             }
     
+    # Обновление контакта: "обнови контакт Удалов..., сделай его партнёром по бизнесу"
+    update_pattern = r'обнови контакт\s+(.+?)\s*(?:,|–|-)\s*(.+)'
+    m_update = re.search(update_pattern, msg_lower)
+    if m_update:
+        fio_query = m_update.group(1).strip()
+        rest = m_update.group(2).strip()
+        data = {}
+        # Пытаемся распознать роль и характеристики аналогично созданию
+        roles = ['мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'сын', 'дочь',
+                 'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега', 
+                 'партнер', 'партнёр', 'начальник', 'директор', 'менеджер', 'клиент', 
+                 'заказчик', 'поставщик', 'инвестор', 'компаньон', 'сосед', 'знакомый']
+        weaknesses_words = ['забывчивый', 'забывчива', 'вспыльчивый', 'вспыльчива', 
+                           'ленивый', 'ленива', 'жадный', 'жадная', 'нервный', 'нервная',
+                           'непунктуальный', 'непунктуальна', 'необязательный', 'необязательна']
+        parts = [w.strip() for w in re.split(r'[,;]', rest) if w.strip()]
+        found_roles = []
+        strengths = []
+        weaknesses = []
+        for part in parts:
+            wl = part.lower()
+            if wl in roles or any(w in wl for w in ['партнер', 'бизнес', 'работ']):
+                found_roles.append(part)
+            elif wl in weaknesses_words:
+                weaknesses.append(part)
+            else:
+                strengths.append(part)
+        if found_roles:
+            data['relation'] = ', '.join(found_roles)
+        if strengths:
+            data['strengths'] = ', '.join(strengths)
+        if weaknesses:
+            data['weaknesses'] = ', '.join(weaknesses)
+        
+        return {
+            "action": "update_person",
+            "fio_query": fio_query,
+            **data
+        }
+    
     return None
 
 
@@ -805,8 +989,8 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
                 logger.info(f"Creating task: {title}, deadline: {deadline}, user: {user_id}")
                 
                 await db.execute(
-                    """INSERT INTO tasks (user_id, title, description, deadline, priority, done)
-                       VALUES (?, ?, ?, ?, ?, 0)""",
+                    """INSERT INTO tasks (user_id, title, description, deadline, priority, done, person_id, reminder_enabled, reminder_time, recurrence_type)
+                       VALUES (?, ?, ?, ?, ?, 0, NULL, 0, NULL, 'none')""",
                     (user_id, title, action.get("description", ""), deadline, priority)
                 )
                 await db.commit()
@@ -818,8 +1002,13 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
                 if not fio:
                     return "❌ Не указано ФИО"
                 
+                # Поля карточки: relation (кем приходится), birth_date, workplace, strengths, weaknesses и т.д.
                 data = {}
-                for field in ["role", "workplace", "phone", "email", "strengths", "weaknesses"]:
+                relation = action.get("relation") or action.get("role")
+                if relation:
+                    data["relation"] = relation
+                for field in ["birth_date", "workplace", "phone", "email", "financial",
+                             "strengths", "weaknesses", "benefits", "problems"]:
                     if action.get(field):
                         data[field] = action.get(field)
                 
@@ -828,7 +1017,60 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
                     (user_id, fio, json.dumps(data, ensure_ascii=False))
                 )
                 await db.commit()
+                
+                summary_parts = []
+                if data.get("relation"):
+                    summary_parts.append(f"кем приходится: {data['relation']}")
+                if data.get("strengths"):
+                    summary_parts.append(f"сильные стороны: {data['strengths']}")
+                if data.get("weaknesses"):
+                    summary_parts.append(f"слабые стороны: {data['weaknesses']}")
+                summary = "; ".join(summary_parts) if summary_parts else ""
+                if summary:
+                    return f"✅ Контакт добавлен: {fio} ({summary})"
                 return f"✅ Контакт добавлен: {fio}"
+            
+            elif action_type == "update_person":
+                fio_query = (action.get("fio_query") or "").strip()
+                if not fio_query:
+                    return "❌ Не указано, кого обновлять"
+                
+                cursor = await db.execute(
+                    "SELECT id, fio, data FROM people WHERE user_id = ? AND LOWER(fio) LIKE ? LIMIT 1",
+                    (user_id, f"%{fio_query.lower()}%")
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return f"❌ Контакт не найден по запросу: {fio_query}"
+                
+                person_id = row[0]
+                fio = row[1]
+                try:
+                    data = json.loads(row[2]) if row[2] else {}
+                except Exception:
+                    data = {}
+                
+                for field in ["relation", "workplace", "financial", "strengths", "weaknesses", "benefits", "problems"]:
+                    if action.get(field):
+                        data[field] = action.get(field)
+                
+                await db.execute(
+                    "UPDATE people SET data = ? WHERE id = ?",
+                    (json.dumps(data, ensure_ascii=False), person_id)
+                )
+                await db.commit()
+                
+                summary_parts = []
+                if action.get("relation"):
+                    summary_parts.append(f"кем приходится: {action['relation']}")
+                if action.get("strengths"):
+                    summary_parts.append(f"сильные стороны: {action['strengths']}")
+                if action.get("weaknesses"):
+                    summary_parts.append(f"слабые стороны: {action['weaknesses']}")
+                summary = "; ".join(summary_parts) if summary_parts else ""
+                if summary:
+                    return f"✅ Контакт обновлён: {fio} ({summary})"
+                return f"✅ Контакт обновлён: {fio}"
             
             elif action_type == "create_knowledge":
                 title = action.get("title", "").strip()
@@ -872,8 +1114,38 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
 async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     """Чат с ИИ-ассистентом, который знает все данные пользователя."""
     
+    text_raw = msg.message.strip()
+    text_lower = text_raw.lower()
+
+    # --- Управление памятью диалога через команды ---
+    # Новый диалог / очистка истории
+    if text_lower in ("новый диалог", "очистить диалог", "очисти диалог", "reset", "start over"):
+        async with aiosqlite.connect(DATABASE) as db:
+            await db.execute("DELETE FROM chat_history WHERE user_id = ?", (x_user_id,))
+            await db.commit()
+        return {
+            "response": "Я очистил нашу историю. Можем начать заново с чистого листа.",
+            "action_executed": False,
+        }
+
+    # Забудь про X — удаляем сообщения, где встречается фраза
+    forget_match = re.match(r"забудь про (.+)", text_lower)
+    if forget_match:
+        phrase = forget_match.group(1).strip()
+        async with aiosqlite.connect(DATABASE) as db:
+            like = f"%{phrase}%"
+            await db.execute(
+                "DELETE FROM chat_history WHERE user_id = ? AND LOWER(content) LIKE ?",
+                (x_user_id, like),
+            )
+            await db.commit()
+        return {
+            "response": f"Ок, постараюсь больше не учитывать информацию про «{phrase}».",
+            "action_executed": False,
+        }
+
     # Сначала проверяем прямые команды (без ИИ)
-    direct_command = parse_user_command(msg.message, x_user_id)
+    direct_command = parse_user_command(text_raw, x_user_id)
     if direct_command:
         result = await execute_ai_action(direct_command, x_user_id)
         logger.info(f"Direct command executed: {direct_command['action']} -> {result}")
@@ -925,11 +1197,11 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             k["tags"] = json.loads(k["tags"])
             knowledge.append(k)
         
-        # Загружаем историю чата (последние 20 сообщений)
+        # Загружаем историю чата (последние 30 сообщений)
         cursor = await db.execute(
             """SELECT role, content FROM chat_history 
                WHERE user_id = ? 
-               ORDER BY created_at DESC LIMIT 20""",
+               ORDER BY created_at DESC LIMIT 30""",
             (x_user_id,)
         )
         history_rows = await cursor.fetchall()
@@ -941,10 +1213,10 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     weekday = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"][now.weekday()]
     
     # Формируем системный промпт
-    system_prompt = f"""Ты — стратегический ИИ-ассистент YouHub. 
-Твоя задача — усиливать позиции пользователя в делах, переговорах и принятии решений.
+    system_prompt = f"""Ты — стратегический ИИ-ассистент YouHub.
+Твоя задача — усиливать позиции пользователя в делах, переговорах и долгосрочных решениях.
 
-У тебя есть ПАМЯТЬ — ты помнишь весь диалог с пользователем. Запоминай имя и всё важное!
+У тебя есть ПАМЯТЬ — ты помнишь весь диалог с пользователем. Запоминай имя и всё важное.
 
 ⏰ Сейчас: {today_str} ({weekday}), {now.strftime("%H:%M")}
 
@@ -953,22 +1225,29 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 • Контакты ({len(people)}): {json.dumps(people, ensure_ascii=False) if people else "нет"} 
 • Знания ({len(knowledge)}): {json.dumps(knowledge, ensure_ascii=False) if knowledge else "нет"}
 
-🎯 Ты умеешь:
-- Анализировать людей, их мотивации и интересы
-- Подсказывать тактики общения и переговоров
-- Предупреждать о рисках и последствиях
-- Думать на 2–3 шага вперёд
-- Помогать с приоритетами задач
+🎯 Формат ответа (всегда):
+1) Краткий вывод (1–2 предложения).
+2) 1–3 конкретных шага / формулировки для действий.
+3) Если есть важные риски — 1 короткое предупреждение.
+
+🧠 Когда вопрос про ЛЮДЕЙ:
+- Анализируй интересы, мотивацию, рычаги влияния и возможные сценарии.
+- Предлагай фразы и тактики общения (как сказать, чтобы было выгодно пользователю).
+- Отмечай возможные конфликты и скрытые последствия.
+
+📋 Когда вопрос про ЗАДАЧИ и дела:
+- Помогай расставить приоритеты и отсечь лишнее.
+- Строй план действий на 2–3 шага вперёд, с минимальными затратами.
 
 📌 Правила:
-- Отвечай КРАТКО (1-3 предложения)
-- Запоминай имя пользователя и контекст
-- Если спрашивают "как меня зовут" — отвечай из памяти диалога
-- НЕ выдумывай данных, используй только то что знаешь
-- НИКОГДА не говори что создал задачу или добавил контакт — ты НЕ умеешь это делать
-- Если просят создать задачу — скажи "Напиши: создай задачу [название]"
-- Отвечай на русском языке
-- Будь полезным советником"""
+- Пиши КРАТКО: без воды, без морализаторства, максимум пользы.
+- Запоминай имя пользователя и контекст диалога.
+- Если спрашивают "как меня зовут" — отвечай из памяти диалога.
+- НЕ выдумывай факты, опирайся только на данные пользователя и логический вывод.
+- НИКОГДА не говори, что создал задачу или добавил контакт — ты этого не умеешь.
+- Если просят создать задачу — скажи: "Напиши: создай задачу …", без имитации действия.
+- Отвечай только на русском языке.
+- Думай как советник из тени, но действуй этично и в интересах пользователя."""
 
     if not openai_client:
         return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
@@ -989,8 +1268,8 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         response = await openai_client.chat.completions.create(
             model=model,
             messages=messages,
-            max_tokens=500,
-            temperature=0.7
+            max_tokens=400,
+            temperature=0.4
         )
         
         ai_response = response.choices[0].message.content.strip()
