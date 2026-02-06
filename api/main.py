@@ -122,9 +122,18 @@ class FinanceTransaction(BaseModel):
     amount: float  # + доход, - расход
     type: str  # "income" or "expense"
     category: str
-    is_fixed: bool = False
     person_id: Optional[int] = None
     comment: Optional[str] = ""
+
+
+class FinanceTransactionUpdate(BaseModel):
+    """Обновление транзакции (все поля опциональны)."""
+    date: Optional[str] = None
+    amount: Optional[float] = None
+    type: Optional[str] = None
+    category: Optional[str] = None
+    person_id: Optional[int] = None
+    comment: Optional[str] = None
 
 
 class FinanceGoal(BaseModel):
@@ -133,6 +142,15 @@ class FinanceGoal(BaseModel):
     current_amount: float = 0
     target_date: Optional[str] = None  # YYYY-MM-DD
     priority: int = 1
+
+
+class FinanceGoalUpdate(BaseModel):
+    """Обновление цели (все поля опциональны)."""
+    title: Optional[str] = None
+    target_amount: Optional[float] = None
+    current_amount: Optional[float] = None
+    target_date: Optional[str] = None
+    priority: Optional[int] = None
 
 
 # === База данных ===
@@ -640,8 +658,8 @@ async def create_transaction(tx: FinanceTransaction, x_user_id: str = Header(...
         cursor = await db.execute(
             """
             INSERT INTO finance_transactions
-            (user_id, date, amount, type, category, is_fixed, person_id, comment)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, date, amount, type, category, person_id, comment)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 x_user_id,
@@ -649,7 +667,6 @@ async def create_transaction(tx: FinanceTransaction, x_user_id: str = Header(...
                 tx.amount,
                 tx.type,
                 tx.category,
-                int(tx.is_fixed),
                 tx.person_id,
                 tx.comment,
             ),
@@ -692,6 +709,61 @@ async def list_transactions(
         return [dict(row) for row in await cursor.fetchall()]
 
 
+@app.patch("/api/finance/transactions/{tx_id}")
+async def update_transaction(tx_id: int, body: FinanceTransactionUpdate, x_user_id: str = Header(...)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            "SELECT id FROM finance_transactions WHERE id = ? AND user_id = ?", (tx_id, x_user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Транзакция не найдена")
+        updates = []
+        params = []
+        if body.date is not None:
+            updates.append("date = ?")
+            params.append(body.date)
+        if body.amount is not None:
+            updates.append("amount = ?")
+            params.append(body.amount)
+        if body.type is not None:
+            if body.type not in ("income", "expense"):
+                raise HTTPException(status_code=400, detail="type должен быть 'income' или 'expense'")
+            updates.append("type = ?")
+            params.append(body.type)
+        if body.category is not None:
+            updates.append("category = ?")
+            params.append(body.category)
+        if body.person_id is not None:
+            updates.append("person_id = ?")
+            params.append(body.person_id)
+        if body.comment is not None:
+            updates.append("comment = ?")
+            params.append(body.comment)
+        if not updates:
+            return {"ok": True}
+        params.append(tx_id)
+        params.append(x_user_id)
+        await db.execute(
+            f"UPDATE finance_transactions SET {', '.join(updates)} WHERE id = ? AND user_id = ?",
+            params,
+        )
+        await db.commit()
+        return {"ok": True}
+
+
+@app.delete("/api/finance/transactions/{tx_id}")
+async def delete_transaction(tx_id: int, x_user_id: str = Header(...)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            "SELECT id FROM finance_transactions WHERE id = ? AND user_id = ?", (tx_id, x_user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Транзакция не найдена")
+        await db.execute("DELETE FROM finance_transactions WHERE id = ? AND user_id = ?", (tx_id, x_user_id))
+        await db.commit()
+        return {"ok": True}
+
+
 @app.post("/api/finance/goals")
 async def create_goal(goal: FinanceGoal, x_user_id: str = Header(...)):
     if goal.target_amount <= 0:
@@ -725,6 +797,58 @@ async def list_goals(x_user_id: str = Header(...)):
             (x_user_id,),
         )
         return [dict(row) for row in await cursor.fetchall()]
+
+
+@app.patch("/api/finance/goals/{goal_id}")
+async def update_goal(goal_id: int, body: FinanceGoalUpdate, x_user_id: str = Header(...)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            "SELECT id FROM finance_goals WHERE id = ? AND user_id = ?", (goal_id, x_user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Цель не найдена")
+        updates = []
+        params = []
+        if body.title is not None:
+            updates.append("title = ?")
+            params.append(body.title)
+        if body.target_amount is not None:
+            if body.target_amount <= 0:
+                raise HTTPException(status_code=400, detail="target_amount должен быть > 0")
+            updates.append("target_amount = ?")
+            params.append(body.target_amount)
+        if body.current_amount is not None:
+            updates.append("current_amount = ?")
+            params.append(body.current_amount)
+        if body.target_date is not None:
+            updates.append("target_date = ?")
+            params.append(body.target_date)
+        if body.priority is not None:
+            updates.append("priority = ?")
+            params.append(body.priority)
+        if not updates:
+            return {"ok": True}
+        params.append(goal_id)
+        params.append(x_user_id)
+        await db.execute(
+            f"UPDATE finance_goals SET {', '.join(updates)} WHERE id = ? AND user_id = ?",
+            params,
+        )
+        await db.commit()
+        return {"ok": True}
+
+
+@app.delete("/api/finance/goals/{goal_id}")
+async def delete_goal(goal_id: int, x_user_id: str = Header(...)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            "SELECT id FROM finance_goals WHERE id = ? AND user_id = ?", (goal_id, x_user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Цель не найдена")
+        await db.execute("DELETE FROM finance_goals WHERE id = ? AND user_id = ?", (goal_id, x_user_id))
+        await db.commit()
+        return {"ok": True}
 
 
 @app.get("/api/finance/summary")
@@ -1708,7 +1832,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         # Последние операции (ограничим 20)
         cursor = await db.execute(
             """
-            SELECT date, amount, type, category, is_fixed, comment
+            SELECT date, amount, type, category, comment
             FROM finance_transactions
             WHERE user_id = ?
             ORDER BY date DESC, id DESC

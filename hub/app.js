@@ -129,6 +129,8 @@ const Nav = {
             // Обновляем экраны при переходе
             if (screenId === 'statsScreen') {
                 Today.render();
+            } else if (screenId === 'financeScreen') {
+                Finance.load();
             } else if (screenId === 'aiScreen') {
                 AI.loadHistory();
             }
@@ -1534,8 +1536,12 @@ init();
 // === ФИНАНСЫ ===
 const Finance = {
     currentMonth: null,
+    filterType: 'balance',   // 'income' | 'expense' | 'balance' (balance = все операции)
+    filterCategory: null,
 
     async load(month = null) {
+        const empty = document.getElementById('financeEmpty');
+        const main = document.getElementById('financeMain');
         try {
             const now = new Date();
             if (!month) {
@@ -1546,113 +1552,142 @@ const Finance = {
             const summary = await API.request('GET', `/api/finance/summary${query}`);
             const txs = await API.request('GET', `/api/finance/transactions${query}`);
             financeSummary = summary;
-            financeTransactions = txs;
-            financeGoals = summary.goals || [];
+            financeTransactions = Array.isArray(txs) ? txs : [];
+            financeGoals = Array.isArray(summary?.goals) ? summary.goals : [];
+            if (empty) empty.classList.remove('show');
+            if (main) main.style.display = 'block';
             this.render();
         } catch (e) {
             console.error('Finance load error:', e);
-            const empty = document.getElementById('financeEmpty');
+            financeSummary = null;
+            financeTransactions = [];
+            financeGoals = [];
             if (empty) {
                 empty.textContent = 'Ошибка загрузки финансовых данных';
+                empty.classList.add('show');
             }
+            if (main) main.style.display = 'none';
+            this.render();
         }
     },
-    
+
     render() {
-        const container = document.getElementById('financeContent');
-        if (!container) return;
-        
-        if (!financeSummary) {
-            container.innerHTML = '<div class="empty">Нет данных. Добавьте доходы и расходы.</div>';
+        const main = document.getElementById('financeMain');
+        const empty = document.getElementById('financeEmpty');
+        if (!main) return;
+
+        if (!financeSummary || !Number.isFinite(financeSummary.income) && !Number.isFinite(financeSummary.expense)) {
+            main.style.display = 'none';
+            if (empty) empty.classList.add('show');
             return;
         }
-        
-        const income = financeSummary.income || 0;
-        const expense = financeSummary.expense || 0;
-        const balance = financeSummary.balance || 0;
-        const byCat = financeSummary.expenses_by_category || [];
-        const incomeByCat = financeSummary.incomes_by_category || [];
-        const goals = financeGoals || [];
+
+        const income = Number(financeSummary.income) || 0;
+        const expense = Number(financeSummary.expense) || 0;
+        const balance = Number(financeSummary.balance) ?? (income - expense);
+        const goals = Array.isArray(financeGoals) ? financeGoals : [];
+        const txs = Array.isArray(financeTransactions) ? financeTransactions : [];
         const monthLabel = this.formatMonthLabel(this.currentMonth);
-        
+
+        let filtered = txs;
+        if (this.filterType === 'income') filtered = txs.filter(t => (t.type || '').toLowerCase() === 'income');
+        else if (this.filterType === 'expense') filtered = txs.filter(t => (t.type || '').toLowerCase() === 'expense');
+        // balance = показываем все
+        if (this.filterCategory) {
+            filtered = filtered.filter(t => (t.category || '').trim() === this.filterCategory);
+        }
+
+        const categoriesForType = [];
+        if (this.filterType === 'income') {
+            const set = new Set();
+            txs.filter(t => (t.type || '').toLowerCase() === 'income').forEach(t => { if (t.category) set.add(t.category.trim()); });
+            categoriesForType.push(...set);
+        } else if (this.filterType === 'expense') {
+            const set = new Set();
+            txs.filter(t => (t.type || '').toLowerCase() === 'expense').forEach(t => { if (t.category) set.add(t.category.trim()); });
+            categoriesForType.push(...set);
+        }
+        const totalFiltered = filtered.reduce((sum, t) => {
+            const amt = Number(t.amount) || 0;
+            return sum + ((t.type || '').toLowerCase() === 'income' ? amt : -amt);
+        }, 0);
+
         let summaryText = '';
         if (!income && !expense) {
             summaryText = `За ${monthLabel.toLowerCase()} пока нет операций.`;
         } else {
-            const diff = balance;
-            if (diff >= 0) {
-                summaryText = `За ${monthLabel.toLowerCase()} вы в плюсе на ${diff.toFixed(0)}.`;
+            if (balance >= 0) {
+                summaryText = `За ${monthLabel.toLowerCase()} вы в плюсе на ${balance.toFixed(0)}.`;
             } else {
-                summaryText = `За ${monthLabel.toLowerCase()} вы потратили больше доходов на ${Math.abs(diff).toFixed(0)}.`;
+                summaryText = `За ${monthLabel.toLowerCase()} вы потратили больше доходов на ${Math.abs(balance).toFixed(0)}.`;
             }
         }
-        
-        container.innerHTML = `
+
+        const cardClass = (type) => {
+            const active = this.filterType === type;
+            const base = type === 'income' ? 'finance-card income' : type === 'expense' ? 'finance-card expense' : 'finance-card balance';
+            return active ? base + ' active' : base + ' clickable';
+        };
+
+        main.innerHTML = `
             <div class="finance-block">
                 <div class="finance-month-bar">
                     <button class="month-btn" onclick="Finance.shiftMonth(-1)">◀</button>
                     <span class="finance-month-label">${monthLabel}</span>
                     <button class="month-btn" onclick="Finance.shiftMonth(1)">▶</button>
                 </div>
-
                 <div class="finance-actions">
                     <button class="btn-primary" onclick="Finance.openTxModal()">💸 Добавить операцию</button>
                 </div>
-
                 <div class="finance-summary">
-                    <div class="finance-card income">
+                    <div class="${cardClass('income')}" onclick="Finance.setFilterType('income')" role="button">
                         <div class="label">Доход</div>
                         <div class="value">+${income.toFixed(0)}</div>
                     </div>
-                    <div class="finance-card expense">
+                    <div class="${cardClass('expense')}" onclick="Finance.setFilterType('expense')" role="button">
                         <div class="label">Расход</div>
                         <div class="value">-${expense.toFixed(0)}</div>
                     </div>
-                    <div class="finance-card balance">
-                        <div class="label">Остаток</div>
+                    <div class="${cardClass('balance')}" onclick="Finance.setFilterType('balance')" role="button">
+                        <div class="label">Баланс</div>
                         <div class="value">${balance.toFixed(0)}</div>
                     </div>
                 </div>
-                
                 <div class="finance-summary-text">${summaryText}</div>
-                
-                <h3>Доходы по категориям</h3>
-                ${incomeByCat.length === 0 ? '<div class="empty small">Пока нет доходов</div>' : `
-                <ul class="finance-list">
-                    ${incomeByCat.map(c => `
-                        <li>
-                            <span>${Utils.escape(c.category)}</span>
-                            <span class="amount">+${c.total.toFixed(0)}</span>
-                        </li>
-                    `).join('')}
-                </ul>`}
 
-                <h3 style="margin-top:16px">Расходы по категориям</h3>
-                ${byCat.length === 0 ? '<div class="empty small">Пока нет расходов</div>' : `
-                <ul class="finance-list">
-                    ${byCat.map(c => `
-                        <li>
-                            <span>${Utils.escape(c.category)}</span>
-                            <span class="amount">-${c.total.toFixed(0)}</span>
-                        </li>
+                ${(this.filterType === 'income' || this.filterType === 'expense') && categoriesForType.length > 0 ? `
+                <div class="finance-category-pills">
+                    <button type="button" class="filter ${!this.filterCategory ? 'active' : ''}" onclick="Finance.setFilterCategory(null)">Все</button>
+                    ${categoriesForType.sort().map(c => `
+                        <button type="button" class="filter ${this.filterCategory === c ? 'active' : ''}" onclick="Finance.setFilterCategory('${Utils.escape(c).replace(/'/g, "\\'")}')">${Utils.escape(c)}</button>
                     `).join('')}
-                </ul>`}
+                </div>
+                ` : ''}
+
+                <h3>Операции</h3>
+                ${filtered.length === 0 ? '<div class="empty small show">Нет операций</div>' : `
+                <ul class="finance-transactions-list">
+                    ${filtered.map(t => this.renderTxItem(t)).join('')}
+                </ul>
+                ${(this.filterCategory || this.filterType !== 'balance') && filtered.length > 0 ? `
+                <div class="finance-filtered-total">Итого: <strong>${totalFiltered >= 0 ? '+' : ''}${totalFiltered.toFixed(0)}</strong></div>
+                ` : ''}
+                `}
             </div>
-            
+
             <div class="finance-block">
                 <div class="finance-actions">
                     <button class="btn-secondary" onclick="Finance.openGoalModal()">🎯 Добавить цель</button>
                 </div>
-                
                 <h3>Цели</h3>
-                ${goals.length === 0 ? '<div class="empty small">Цели ещё не созданы</div>' : `
+                ${goals.length === 0 ? '<div class="empty small show">Цели ещё не созданы</div>' : `
                 <ul class="finance-goals">
                     ${goals.map(g => {
-                        const target = g.target_amount || 0;
-                        const current = g.current_amount || 0;
+                        const target = Number(g.target_amount) || 0;
+                        const current = Number(g.current_amount) || 0;
                         const pct = target > 0 ? Math.min(100, Math.round(current / target * 100)) : 0;
                         return `
-                            <li>
+                            <li onclick="Finance.openGoalModal(${g.id})" class="goal-item-clickable">
                                 <div class="goal-title">${Utils.escape(g.title)}</div>
                                 <div class="goal-progress">
                                     <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
@@ -1663,6 +1698,33 @@ const Finance = {
                     }).join('')}
                 </ul>`}
             </div>
+        `;
+    },
+
+    setFilterType(type) {
+        this.filterType = type;
+        this.filterCategory = null;
+        this.render();
+    },
+
+    setFilterCategory(cat) {
+        this.filterCategory = cat;
+        this.render();
+    },
+
+    renderTxItem(t) {
+        const isIncome = (t.type || '').toLowerCase() === 'income';
+        const amount = Number(t.amount) || 0;
+        const dateStr = t.date ? Utils.formatDate(t.date) : '';
+        return `
+            <li class="finance-tx-item" onclick="Finance.openTxModal(${t.id})" data-tx-id="${t.id}">
+                <button type="button" class="finance-tx-delete" onclick="event.stopPropagation();Finance.deleteTransaction(${t.id})" title="Удалить">×</button>
+                <div class="finance-tx-main">
+                    <span class="finance-tx-cat">${Utils.escape(t.category || 'Прочее')}</span>
+                    <span class="finance-tx-amount ${isIncome ? 'income' : 'expense'}">${isIncome ? '+' : '-'}${amount.toFixed(0)}</span>
+                </div>
+                <div class="finance-tx-meta">${dateStr}${t.comment ? ' · ' + Utils.escape(t.comment) : ''}</div>
+            </li>
         `;
     },
 
@@ -1691,30 +1753,30 @@ const Finance = {
         this.load(newMonth);
     },
     
-    openTxModal() {
+    openTxModal(id = null) {
         const modal = document.getElementById('financeTxModal');
-        if (!modal) return;
-        document.getElementById('txType').value = 'expense';
-        document.getElementById('txDate').value = Utils.today();
-        document.getElementById('txAmount').value = '';
-        document.getElementById('txCategory').value = '';
-        document.getElementById('txIsFixed').checked = false;
-        document.getElementById('txComment').value = '';
-        // Обновляем видимость чекбокса и подсказок категорий
+        const titleEl = document.getElementById('financeTxModalTitle');
+        const txIdEl = document.getElementById('txId');
+        if (!modal || !txIdEl) return;
+
+        const tx = id ? (financeTransactions || []).find(t => t.id === id) : null;
+        if (titleEl) titleEl.textContent = tx ? 'Редактировать операцию' : 'Новая операция';
+        txIdEl.value = tx ? tx.id : '';
+
+        document.getElementById('txType').value = tx ? (tx.type || 'expense') : 'expense';
+        document.getElementById('txDate').value = tx?.date ? tx.date.split('T')[0] : Utils.today();
+        document.getElementById('txAmount').value = tx ? (Number(tx.amount) || '') : '';
+        document.getElementById('txCategory').value = tx?.category || '';
+        document.getElementById('txComment').value = tx?.comment || '';
+
         this.onTypeChange();
         const catInput = document.getElementById('txCategory');
         const suggestions = document.getElementById('txCategorySuggestions');
         if (catInput && suggestions) {
             suggestions.style.display = 'none';
             if (!catInput._hasFocusListener) {
-                catInput.addEventListener('focus', () => {
-                    suggestions.style.display = 'flex';
-                });
-                catInput.addEventListener('blur', () => {
-                    setTimeout(() => {
-                        suggestions.style.display = 'none';
-                    }, 150);
-                });
+                catInput.addEventListener('focus', () => { suggestions.style.display = 'flex'; });
+                catInput.addEventListener('blur', () => { setTimeout(() => { suggestions.style.display = 'none'; }, 150); });
                 catInput._hasFocusListener = true;
             }
         }
@@ -1732,27 +1794,23 @@ const Finance = {
     },
     
     async saveTransaction() {
+        const id = document.getElementById('txId').value.trim();
         const type = document.getElementById('txType').value;
         const date = document.getElementById('txDate').value || Utils.today();
         const amountStr = document.getElementById('txAmount').value;
         const category = document.getElementById('txCategory').value.trim() || 'Прочее';
-        const isFixed = document.getElementById('txIsFixed').checked;
         const comment = document.getElementById('txComment').value.trim();
-        
         const amount = parseFloat(amountStr);
         if (!amount || amount <= 0) {
             return (tg?.showAlert ? tg.showAlert('Введите сумму операции') : alert('Введите сумму операции'));
         }
-        
+        const payload = { type, date, amount, category, comment };
         try {
-            await API.request('POST', '/api/finance/transactions', {
-                type,
-                date,
-                amount,
-                category,
-                is_fixed: isFixed,
-                comment
-            });
+            if (id) {
+                await API.request('PATCH', `/api/finance/transactions/${id}`, payload);
+            } else {
+                await API.request('POST', '/api/finance/transactions', payload);
+            }
             this.closeTxModal();
             await this.load();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
@@ -1761,6 +1819,21 @@ const Finance = {
             const msg = e.message || 'Ошибка сохранения операции';
             if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
         }
+    },
+
+    async deleteTransaction(id) {
+        const doDelete = async () => {
+            try {
+                await API.request('DELETE', `/api/finance/transactions/${id}`);
+                await this.load();
+                if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+            } catch (e) {
+                console.error('Finance tx delete error:', e);
+                if (tg?.showAlert) tg.showAlert(e.message || 'Ошибка удаления'); else alert(e.message);
+            }
+        };
+        if (tg?.showConfirm) tg.showConfirm('Удалить операцию?', ok => { if (ok) doDelete(); });
+        else if (confirm('Удалить операцию?')) doDelete();
     },
 
     setCategory(name) {
@@ -1772,11 +1845,7 @@ const Finance = {
 
     onTypeChange() {
         const type = document.getElementById('txType')?.value;
-        const fixedWrapper = document.getElementById('txFixedWrapper');
         const suggestions = document.getElementById('txCategorySuggestions');
-        if (fixedWrapper) {
-            fixedWrapper.style.display = type === 'expense' ? 'flex' : 'none';
-        }
         if (suggestions) {
             const exp = suggestions.querySelector('.tags-expense');
             const inc = suggestions.querySelector('.tags-income');
@@ -1792,15 +1861,83 @@ const Finance = {
         }
     },
     
-    openGoalModal() {
+    openGoalModal(id = null) {
         const modal = document.getElementById('financeGoalModal');
-        if (!modal) return;
-        document.getElementById('goalTitle').value = '';
-        document.getElementById('goalTarget').value = '';
-        document.getElementById('goalCurrent').value = '';
-        document.getElementById('goalDate').value = '';
-        document.getElementById('goalPriority').value = '1';
+        const titleEl = document.getElementById('financeGoalModalTitle');
+        const goalIdEl = document.getElementById('goalId');
+        const deleteBtn = document.getElementById('goalDeleteBtn');
+        if (!modal || !goalIdEl) return;
+
+        const goal = id ? (financeGoals || []).find(g => g.id === id) : null;
+        if (titleEl) titleEl.textContent = goal ? 'Редактировать цель' : 'Новая цель';
+        goalIdEl.value = goal ? goal.id : '';
+        if (deleteBtn) deleteBtn.style.display = goal ? 'block' : 'none';
+
+        document.getElementById('goalTitle').value = goal?.title || '';
+        document.getElementById('goalTarget').value = goal ? (Number(goal.target_amount) || '') : '';
+        document.getElementById('goalCurrent').value = goal ? (Number(goal.current_amount) || '') : '';
+        document.getElementById('goalDate').value = goal?.target_date ? goal.target_date.split('T')[0] : '';
+        document.getElementById('goalPriority').value = goal?.priority != null ? String(goal.priority) : '1';
+        const topUpEl = document.getElementById('goalTopUpAmount');
+        if (topUpEl) topUpEl.value = '';
         modal.classList.add('open');
+    },
+
+    async addToGoal(mode) {
+        const topUpEl = document.getElementById('goalTopUpAmount');
+        const currentEl = document.getElementById('goalCurrent');
+        const goalIdEl = document.getElementById('goalId');
+        const goalTitleEl = document.getElementById('goalTitle');
+        if (!topUpEl || !currentEl) return;
+        const sum = parseFloat(topUpEl.value);
+        if (!sum || sum <= 0) {
+            (tg?.showAlert ? tg.showAlert('Введите сумму пополнения') : alert('Введите сумму пополнения'));
+            return;
+        }
+        const prev = parseFloat(currentEl.value) || 0;
+        const next = prev + sum;
+        currentEl.value = next.toFixed(2);
+        topUpEl.value = '';
+        const id = goalIdEl?.value?.trim();
+        const goalTitle = goalTitleEl?.value?.trim() || 'Цель';
+        try {
+            if (id) {
+                await API.request('PATCH', `/api/finance/goals/${id}`, { current_amount: next });
+            }
+            if (mode === 'defer') {
+                await API.request('POST', '/api/finance/transactions', {
+                    type: 'income',
+                    date: Utils.today(),
+                    amount: sum,
+                    category: 'Сбережения',
+                    comment: `Пополнение цели: ${goalTitle}`
+                });
+            }
+            await this.load();
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        } catch (e) {
+            console.error('Goal top-up error:', e);
+            currentEl.value = prev.toFixed(2);
+            if (tg?.showAlert) tg.showAlert(e.message || 'Ошибка пополнения'); else alert(e.message);
+        }
+    },
+
+    async deleteGoal() {
+        const id = document.getElementById('goalId').value.trim();
+        if (!id) return;
+        const doDelete = async () => {
+            try {
+                await API.request('DELETE', `/api/finance/goals/${id}`);
+                this.closeGoalModal();
+                await this.load();
+                if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+            } catch (e) {
+                console.error('Finance goal delete error:', e);
+                if (tg?.showAlert) tg.showAlert(e.message || 'Ошибка удаления'); else alert(e.message);
+            }
+        };
+        if (tg?.showConfirm) tg.showConfirm('Удалить цель?', ok => { if (ok) doDelete(); });
+        else if (confirm('Удалить цель?')) doDelete();
     },
     
     closeGoalModal() {
@@ -1809,6 +1946,7 @@ const Finance = {
     },
     
     async saveGoal() {
+        const id = document.getElementById('goalId').value.trim();
         const title = document.getElementById('goalTitle').value.trim();
         const targetStr = document.getElementById('goalTarget').value;
         const currentStr = document.getElementById('goalCurrent').value || '0';
@@ -1824,14 +1962,13 @@ const Finance = {
             return (tg?.showAlert ? tg.showAlert('Введите корректную целевую сумму') : alert('Введите корректную целевую сумму'));
         }
         
+        const payload = { title, target_amount, current_amount, target_date, priority };
         try {
-            await API.request('POST', '/api/finance/goals', {
-                title,
-                target_amount,
-                current_amount,
-                target_date,
-                priority
-            });
+            if (id) {
+                await API.request('PATCH', `/api/finance/goals/${id}`, payload);
+            } else {
+                await API.request('POST', '/api/finance/goals', payload);
+            }
             this.closeGoalModal();
             await this.load();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');

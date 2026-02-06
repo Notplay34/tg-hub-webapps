@@ -165,7 +165,8 @@
             </header>
             
             <main class="content" id="financeContent">
-                <div class="empty" id="financeEmpty">Нет данных. Добавьте доходы и расходы.</div>
+                <div class="empty show" id="financeEmpty">Нет данных. Добавьте доходы и расходы.</div>
+                <div id="financeMain" style="display:none"></div>
             </main>
         </section>
 
@@ -299,10 +300,11 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <button class="modal-close" onclick="Finance.closeTxModal()">×</button>
-                    <h2>Новая операция</h2>
+                    <h2 id="financeTxModalTitle">Новая операция</h2>
                     <button class="btn-save" onclick="Finance.saveTransaction()">✓</button>
                 </div>
                 <form id="financeTxForm" onsubmit="return false">
+                    <input type="hidden" id="txId">
                     <div class="form-row">
                         <div class="form-group">
                             <label>Тип</label>
@@ -342,14 +344,6 @@
                         </div>
                     </div>
                     <div class="form-group">
-                        <div class="tags-expense">
-                            <label class="checkbox-label" id="txFixedWrapper">
-                                <input type="checkbox" id="txIsFixed">
-                                <span id="txFixedLabel">Ежемесячный платёж</span>
-                            </label>
-                        </div>
-                    </div>
-                    <div class="form-group">
                         <label>Комментарий</label>
                         <textarea id="txComment" rows="2" placeholder="Описание операции"></textarea>
                     </div>
@@ -362,10 +356,11 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <button class="modal-close" onclick="Finance.closeGoalModal()">×</button>
-                    <h2>Новая цель</h2>
+                    <h2 id="financeGoalModalTitle">Новая цель</h2>
                     <button class="btn-save" onclick="Finance.saveGoal()">✓</button>
                 </div>
                 <form id="financeGoalForm" onsubmit="return false">
+                    <input type="hidden" id="goalId">
                     <div class="form-group">
                         <label>Цель</label>
                         <input type="text" id="goalTitle" placeholder="Например: подушка безопасности" required>
@@ -377,7 +372,7 @@
                         </div>
                         <div class="form-group">
                             <label>Уже накоплено</label>
-                            <input type="number" id="goalCurrent" step="0.01" placeholder="0">
+                            <input type="number" id="goalCurrent" step="0.01" placeholder="0" readonly class="goal-current-readonly">
                         </div>
                     </div>
                     <div class="form-row">
@@ -393,6 +388,14 @@
                                 <option value="3">Низкий</option>
                             </select>
                         </div>
+                    </div>
+                    <div class="goal-buttons-row">
+                        <div class="goal-buttons-left">
+                            <input type="number" id="goalTopUpAmount" step="0.01" placeholder="Сумма" min="0" class="goal-topup-input">
+                            <button type="button" class="btn-goal-action btn-goal-green" onclick="Finance.addToGoal('defer')">Сбережения</button>
+                            <button type="button" class="btn-goal-action btn-goal-blue" onclick="Finance.addToGoal('balance')">Из остатка</button>
+                        </div>
+                        <button type="button" class="btn-goal-delete" id="goalDeleteBtn" onclick="Finance.deleteGoal()" style="display:none">Удалить цель</button>
                     </div>
                 </form>
             </div>

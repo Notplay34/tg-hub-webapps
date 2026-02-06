@@ -1102,6 +1102,122 @@ body {
     color: var(--accent);
 }
 
+.finance-card.clickable {
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.finance-card.clickable:active {
+    transform: scale(0.98);
+    box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+}
+.finance-card.active {
+    box-shadow: 0 0 0 2px var(--accent);
+}
+
+.finance-category-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+.finance-category-pills .filter {
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+}
+.finance-category-pills .filter.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+}
+
+.finance-transactions-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.finance-tx-item {
+    display: block;
+    position: relative;
+    padding: 12px 44px 12px 12px;
+    margin-bottom: 8px;
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    border: 1px solid var(--border);
+}
+.finance-tx-item:active {
+    background: var(--border);
+}
+.finance-tx-delete {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 20px;
+    height: 20px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255,59,48,0.12);
+    color: var(--danger);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+.finance-tx-delete:active {
+    background: rgba(255,59,48,0.25);
+}
+.finance-tx-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+.finance-tx-cat {
+    font-size: 14px;
+    font-weight: 500;
+}
+.finance-tx-amount {
+    font-size: 15px;
+    font-weight: 600;
+}
+.finance-tx-amount.income { color: #4caf50; }
+.finance-tx-amount.expense { color: #e53935; }
+.finance-tx-meta {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.finance-filtered-total {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+.finance-filtered-total strong {
+    color: var(--text);
+}
+
+.empty.small {
+    padding: 24px 16px;
+    font-size: 13px;
+}
+.empty.small.show {
+    display: block;
+}
+.empty.small.show::before {
+    display: none;
+}
+
 .finance-block {
     margin-bottom: 20px;
 }
@@ -1167,6 +1283,80 @@ body {
     padding: 8px 10px;
     border-radius: 10px;
     background: var(--bg-secondary);
+}
+.finance-goals li.goal-item-clickable {
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+.finance-goals li.goal-item-clickable:active {
+    background: var(--border);
+}
+
+.goal-buttons-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 16px;
+    margin-bottom: 0;
+    flex-wrap: wrap;
+}
+.goal-buttons-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.goal-topup-input {
+    width: 72px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    background: var(--bg-secondary);
+    color: var(--text);
+}
+.btn-goal-action {
+    padding: 8px 14px;
+    border: none;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+}
+.btn-goal-green {
+    background: rgba(48, 209, 88, 0.25);
+    color: #34c759;
+    border: 1px solid rgba(48, 209, 88, 0.4);
+}
+.btn-goal-green:active {
+    background: rgba(48, 209, 88, 0.4);
+}
+.btn-goal-blue {
+    background: rgba(0, 122, 255, 0.2);
+    color: var(--accent);
+    border: 1px solid rgba(0, 122, 255, 0.4);
+}
+.btn-goal-blue:active {
+    background: rgba(0, 122, 255, 0.35);
+}
+.btn-goal-delete {
+    padding: 8px 14px;
+    border: none;
+    border-radius: 10px;
+    background: rgba(255,69,58,0.2);
+    color: var(--danger);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.btn-goal-delete:active {
+    background: rgba(255,69,58,0.35);
+}
+.goal-current-readonly {
+    background: var(--bg-secondary) !important;
+    color: var(--text-secondary);
+    cursor: default;
 }
 .goal-title {
     font-size: 14px;
