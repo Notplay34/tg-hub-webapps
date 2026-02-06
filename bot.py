@@ -205,6 +205,104 @@ async def send_overdue_reminder():
             logger.error(f"Ошибка отправки напоминания {user_id}: {e}")
 
 
+async def generate_fixed_expenses_for_today():
+    """
+    Ежедневная проверка и создание повторяющихся фиксированных расходов.
+    Логика:
+    - Берём все операции с is_fixed = 1 и type = 'expense'.
+    - Для каждой пары (user_id, category, amount) смотрим самую свежую операцию.
+    - Если в текущем месяце ещё не было такой операции и
+      день месяца совпадает с днём последней операции — создаём новую:
+        - дата = сегодня,
+        - поля копируются,
+        - дополнительно создаём задачу "Оплатить <категория или комментарий>" на сегодня
+          с напоминанием на 09:00.
+    """
+    today = datetime.now().date()
+    start_month = today.replace(day=1)
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM finance_transactions
+            WHERE is_fixed = 1 AND type = 'expense'
+            ORDER BY user_id, category, amount, date DESC, id DESC
+            """
+        )
+        rows = await cursor.fetchall()
+
+        # Оставляем по одному "шаблону" на (user_id, category, amount)
+        templates = {}
+        for row in rows:
+            key = (row["user_id"], row["category"], row["amount"])
+            if key not in templates:
+                templates[key] = row
+
+        to_insert = []
+        for key, row in templates.items():
+            last_date = datetime.strptime(row["date"], "%Y-%m-%d").date()
+            # Уже есть операция в этом месяце — пропускаем
+            if last_date.year == today.year and last_date.month == today.month:
+                continue
+            # Делаем платёж в тот же день месяца, что и последний раз
+            if last_date.day != today.day:
+                continue
+            to_insert.append(row)
+
+        if not to_insert:
+            return
+
+        for row in to_insert:
+            user_id = row["user_id"]
+            category = row["category"]
+            amount = row["amount"]
+            is_fixed = row["is_fixed"]
+            comment = row["comment"]
+
+            # Создаём новую операцию
+            await db.execute(
+                """
+                INSERT INTO finance_transactions (user_id, date, amount, type, category, is_fixed, person_id, comment)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    today.isoformat(),
+                    amount,
+                    "expense",
+                    category,
+                    is_fixed,
+                    row["person_id"],
+                    comment,
+                ),
+            )
+
+            # Создаём задачу-напоминание
+            title = comment or f"Оплатить {category}"
+            await db.execute(
+                """
+                INSERT INTO tasks (
+                    user_id, title, description, deadline, priority,
+                    done, person_id, reminder_enabled, reminder_time, recurrence_type
+                )
+                VALUES (?, ?, ?, ?, ?, 0, ?, 1, ?, 'none')
+                """,
+                (
+                    user_id,
+                    title,
+                    "",
+                    today.isoformat(),
+                    "high",
+                    row["person_id"],
+                    "09:00",
+                ),
+            )
+
+        await db.commit()
+        logger.info(f"Созданы повторяющиеся расходы на дату {today.isoformat()}: {len(to_insert)} шт.")
+
+
 def setup_scheduler():
     """Настройка расписания напоминаний."""
     # Утром в 9:00 — задачи на сегодня
@@ -216,10 +314,13 @@ def setup_scheduler():
     # Днём в 12:00 — просроченные задачи
     scheduler.add_job(send_overdue_reminder, CronTrigger(hour=12, minute=0))
     
+    # Каждый день в 7:00 — генерация повторяющихся расходов
+    scheduler.add_job(generate_fixed_expenses_for_today, CronTrigger(hour=7, minute=0))
+    
     # Каждую минуту — персональное время из карточки задачи
     scheduler.add_job(send_reminders_by_time, CronTrigger(minute="*"))
     
-    logger.info("Scheduler: 9:00, 12:00, 20:00 + персональное время")
+    logger.info("Scheduler: 7:00 fixed expenses, 9:00, 12:00, 20:00 + персональное время")
 
 
 async def main():

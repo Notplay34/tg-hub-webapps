@@ -129,6 +129,8 @@ const Nav = {
             // Обновляем экраны при переходе
             if (screenId === 'statsScreen') {
                 Today.render();
+            } else if (screenId === 'aiScreen') {
+                AI.loadHistory();
             }
         }
     }
@@ -485,6 +487,17 @@ const Tasks = {
         };
         
         const statusIcon = task.done ? '✅' : (task.deadline && task.deadline < today ? '⏰' : '📋');
+        const hasReminder = task.reminder_enabled && task.reminder_time && task.reminder_time !== 'none';
+        const isRepeated = task.recurrence_type && task.recurrence_type !== 'none';
+        let reminderLabel = '';
+        if (hasReminder) {
+            if (task.reminder_time && task.reminder_time.startsWith('before_')) {
+                const time = task.reminder_time.replace('before_', '');
+                reminderLabel = `🔔 за день в ${time}`;
+            } else {
+                reminderLabel = `🔔 ${task.reminder_time}`;
+            }
+        }
         
         return `
             <div class="card-swipe-wrapper">
@@ -505,6 +518,8 @@ const Tasks = {
                                     ${priorityIcons[task.priority] || '🟡'} ${task.priority === 'high' ? 'Высокий' : (task.priority === 'low' ? 'Низкий' : 'Средний')}
                                 </span>
                                 ${task.deadline ? `<span class="${deadlineClass}">📅 ${Utils.formatDate(task.deadline)}</span>` : ''}
+                                ${isRepeated ? `<span class="meta-pill">🔁 Повтор</span>` : ''}
+                                ${hasReminder ? `<span class="meta-pill">${reminderLabel}</span>` : ''}
                             </div>
                             ${person ? `<div class="linked-person" style="margin-top:8px"><span class="avatar small">${Utils.initials(person.fio)}</span>${Utils.escape(person.fio)}</div>` : ''}
                         </div>
@@ -1293,7 +1308,32 @@ const Timeline = {
 // === ИИ АССИСТЕНТ ===
 const AI = {
     isLoading: false,
+    isHistoryLoaded: false,
     
+    async loadHistory() {
+        if (this.isHistoryLoaded) return;
+        const messages = document.getElementById('chatMessages');
+        const welcome = document.querySelector('.chat-welcome');
+        try {
+            const data = await API.request('GET', '/api/chat/history');
+            const history = data.history || [];
+            if (!history.length) return;
+            if (welcome) welcome.style.display = 'none';
+            messages.innerHTML = '';
+            history.forEach(h => {
+                if (h.role === 'user') {
+                    messages.innerHTML += `<div class="chat-msg user">${Utils.escape(h.content)}</div>`;
+                } else {
+                    messages.innerHTML += `<div class="chat-msg ai">${Utils.escape(h.content)}</div>`;
+                }
+            });
+            messages.scrollTop = messages.scrollHeight;
+            this.isHistoryLoaded = true;
+        } catch (e) {
+            console.error('AI history load error:', e);
+        }
+    },
+
     async send() {
         const input = document.getElementById('chatInput');
         const text = input.value.trim();
@@ -1333,10 +1373,21 @@ const AI = {
             
             // Убираем загрузку и показываем ответ
             document.getElementById(`loading-${loadingId}`).remove();
-            messages.innerHTML += `<div class="chat-msg ai">${Utils.escape(data.response)}</div>`;
+            
+            const isAction = !!data.action_executed;
+            const meta = isAction
+                ? '<div class="chat-msg-meta">⚙ Выполнено действие в системе</div>'
+                : '';
+            
+            messages.innerHTML += `
+                <div class="chat-msg ai${isAction ? ' action' : ''}">
+                    ${Utils.escape(data.response)}
+                    ${meta}
+                </div>
+            `;
             
             // Если ИИ выполнил действие — обновляем данные
-            if (data.action_executed) {
+            if (isAction) {
                 await loadAllData(true); // Принудительное обновление
                 if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
             }
@@ -1482,9 +1533,16 @@ init();
 
 // === ФИНАНСЫ ===
 const Finance = {
+    currentMonth: null,
+
     async load(month = null) {
         try {
-            const query = month ? `?month=${month}` : '';
+            const now = new Date();
+            if (!month) {
+                month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+            }
+            this.currentMonth = month;
+            const query = `?month=${month}`;
             const summary = await API.request('GET', `/api/finance/summary${query}`);
             const txs = await API.request('GET', `/api/finance/transactions${query}`);
             financeSummary = summary;
@@ -1513,10 +1571,30 @@ const Finance = {
         const expense = financeSummary.expense || 0;
         const balance = financeSummary.balance || 0;
         const byCat = financeSummary.expenses_by_category || [];
+        const incomeByCat = financeSummary.incomes_by_category || [];
         const goals = financeGoals || [];
+        const monthLabel = this.formatMonthLabel(this.currentMonth);
+        
+        let summaryText = '';
+        if (!income && !expense) {
+            summaryText = `За ${monthLabel.toLowerCase()} пока нет операций.`;
+        } else {
+            const diff = balance;
+            if (diff >= 0) {
+                summaryText = `За ${monthLabel.toLowerCase()} вы в плюсе на ${diff.toFixed(0)}.`;
+            } else {
+                summaryText = `За ${monthLabel.toLowerCase()} вы потратили больше доходов на ${Math.abs(diff).toFixed(0)}.`;
+            }
+        }
         
         container.innerHTML = `
             <div class="finance-block">
+                <div class="finance-month-bar">
+                    <button class="month-btn" onclick="Finance.shiftMonth(-1)">◀</button>
+                    <span class="finance-month-label">${monthLabel}</span>
+                    <button class="month-btn" onclick="Finance.shiftMonth(1)">▶</button>
+                </div>
+
                 <div class="finance-actions">
                     <button class="btn-primary" onclick="Finance.openTxModal()">💸 Добавить операцию</button>
                 </div>
@@ -1536,7 +1614,20 @@ const Finance = {
                     </div>
                 </div>
                 
-                <h3>Расходы по категориям</h3>
+                <div class="finance-summary-text">${summaryText}</div>
+                
+                <h3>Доходы по категориям</h3>
+                ${incomeByCat.length === 0 ? '<div class="empty small">Пока нет доходов</div>' : `
+                <ul class="finance-list">
+                    ${incomeByCat.map(c => `
+                        <li>
+                            <span>${Utils.escape(c.category)}</span>
+                            <span class="amount">+${c.total.toFixed(0)}</span>
+                        </li>
+                    `).join('')}
+                </ul>`}
+
+                <h3 style="margin-top:16px">Расходы по категориям</h3>
                 ${byCat.length === 0 ? '<div class="empty small">Пока нет расходов</div>' : `
                 <ul class="finance-list">
                     ${byCat.map(c => `
@@ -1574,6 +1665,31 @@ const Finance = {
             </div>
         `;
     },
+
+    formatMonthLabel(monthStr) {
+        if (!monthStr) return '';
+        const [y, m] = monthStr.split('-').map(Number);
+        const d = new Date(y, m - 1, 1);
+        return d.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+    },
+
+    shiftMonth(delta) {
+        if (!this.currentMonth) {
+            const now = new Date();
+            this.currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        }
+        let [y, m] = this.currentMonth.split('-').map(Number);
+        m += delta;
+        if (m < 1) {
+            m = 12;
+            y -= 1;
+        } else if (m > 12) {
+            m = 1;
+            y += 1;
+        }
+        const newMonth = `${y}-${String(m).padStart(2, '0')}`;
+        this.load(newMonth);
+    },
     
     openTxModal() {
         const modal = document.getElementById('financeTxModal');
@@ -1584,6 +1700,29 @@ const Finance = {
         document.getElementById('txCategory').value = '';
         document.getElementById('txIsFixed').checked = false;
         document.getElementById('txComment').value = '';
+        // Обновляем видимость чекбокса и подсказок категорий
+        this.onTypeChange();
+        const catInput = document.getElementById('txCategory');
+        const suggestions = document.getElementById('txCategorySuggestions');
+        if (catInput && suggestions) {
+            suggestions.style.display = 'none';
+            if (!catInput._hasFocusListener) {
+                catInput.addEventListener('focus', () => {
+                    suggestions.style.display = 'flex';
+                });
+                catInput.addEventListener('blur', () => {
+                    setTimeout(() => {
+                        suggestions.style.display = 'none';
+                    }, 150);
+                });
+                catInput._hasFocusListener = true;
+            }
+        }
+        const typeSelect = document.getElementById('txType');
+        if (typeSelect && !typeSelect._hasListener) {
+            typeSelect.addEventListener('change', () => this.onTypeChange());
+            typeSelect._hasListener = true;
+        }
         modal.classList.add('open');
     },
     
@@ -1621,6 +1760,35 @@ const Finance = {
             console.error('Finance tx save error:', e);
             const msg = e.message || 'Ошибка сохранения операции';
             if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
+        }
+    },
+
+    setCategory(name) {
+        const input = document.getElementById('txCategory');
+        if (!input) return;
+        input.value = name;
+        input.focus();
+    },
+
+    onTypeChange() {
+        const type = document.getElementById('txType')?.value;
+        const fixedWrapper = document.getElementById('txFixedWrapper');
+        const suggestions = document.getElementById('txCategorySuggestions');
+        if (fixedWrapper) {
+            fixedWrapper.style.display = type === 'expense' ? 'flex' : 'none';
+        }
+        if (suggestions) {
+            const exp = suggestions.querySelector('.tags-expense');
+            const inc = suggestions.querySelector('.tags-income');
+            if (exp && inc) {
+                if (type === 'income') {
+                    exp.style.display = 'none';
+                    inc.style.display = 'flex';
+                } else {
+                    exp.style.display = 'flex';
+                    inc.style.display = 'none';
+                }
+            }
         }
     },
     

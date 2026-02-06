@@ -15,6 +15,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Память чата
+CHAT_HISTORY_LIMIT = 80          # сколько последних сообщений держим "сырыми"
+CHAT_SUMMARY_CHUNK = 40         # сколько старых сообщений сжимаем за один раз
+CHAT_SUMMARY_THRESHOLD = 200    # с какого общего количества начинаем сжатие
+
 # Поддержка разных провайдеров ИИ
 # Приоритет: OpenRouter > vsellm > Google > Yandex
 api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("VSELM_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("YANDEX_API_KEY")
@@ -35,6 +40,7 @@ if os.getenv("OPENROUTER_API_KEY"):
         "HTTP-Referer": "https://tghub.duckdns.org",
         "X-Title": "YouHub"
     }
+
 
 openai_client = AsyncOpenAI(
     api_key=api_key,
@@ -80,7 +86,6 @@ class TaskUpdate(BaseModel):
     reminder_enabled: Optional[bool] = None
     reminder_time: Optional[str] = None
     recurrence_type: Optional[str] = None
-    reminder_time: Optional[str] = None
 
 
 class Person(BaseModel):
@@ -154,18 +159,25 @@ async def init_db():
         """)
         
         # Добавляем колонки если их нет (для существующих БД)
+        # Логируем реальные ошибки, кроме "duplicate column name"
         try:
             await db.execute("ALTER TABLE tasks ADD COLUMN reminder_enabled INTEGER DEFAULT 0")
-        except:
-            pass
+        except Exception as e:
+            msg = str(e).lower()
+            if "duplicate column name" not in msg:
+                print(f"[DB MIGRATION] tasks.reminder_enabled failed: {e}")
         try:
             await db.execute("ALTER TABLE tasks ADD COLUMN reminder_time TEXT")
-        except:
-            pass
+        except Exception as e:
+            msg = str(e).lower()
+            if "duplicate column name" not in msg:
+                print(f"[DB MIGRATION] tasks.reminder_time failed: {e}")
         try:
             await db.execute("ALTER TABLE tasks ADD COLUMN recurrence_type TEXT DEFAULT 'none'")
-        except:
-            pass
+        except Exception as e:
+            msg = str(e).lower()
+            if "duplicate column name" not in msg:
+                print(f"[DB MIGRATION] tasks.recurrence_type failed: {e}")
         
         await db.execute("""
             CREATE TABLE IF NOT EXISTS people (
@@ -255,12 +267,16 @@ async def init_db():
         # Миграция: добавляем person_id если нет
         try:
             await db.execute("ALTER TABLE tasks ADD COLUMN person_id INTEGER")
-        except:
-            pass
+        except Exception as e:
+            msg = str(e).lower()
+            if "duplicate column name" not in msg:
+                print(f"[DB MIGRATION] tasks.person_id failed: {e}")
         try:
             await db.execute("ALTER TABLE knowledge ADD COLUMN person_id INTEGER")
-        except:
-            pass
+        except Exception as e:
+            msg = str(e).lower()
+            if "duplicate column name" not in msg:
+                print(f"[DB MIGRATION] knowledge.person_id failed: {e}")
         
         await db.commit()
 
@@ -268,6 +284,30 @@ async def init_db():
 @app.on_event("startup")
 async def startup():
     await init_db()
+
+
+@app.get("/api/health")
+async def health():
+    """
+    Простой health-check для nginx/мониторинга.
+    Возвращает 200, если:
+    - приложение поднято
+    - есть доступ к БД
+    - (опционально) клиент ИИ инициализирован
+    """
+    # Проверяем базу
+    try:
+        async with aiosqlite.connect(DATABASE) as db:
+            await db.execute("SELECT 1")
+    except Exception as e:
+        # Если БД недоступна — сразу 500
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+    return {
+        "status": "ok",
+        "db": "ok",
+        "ai_client": bool(openai_client),
+    }
 
 
 # === УТИЛИТЫ ===
@@ -739,6 +779,19 @@ async def finance_summary(
         )
         expenses_by_category = [dict(row) for row in await cursor.fetchall()]
 
+        # Доходы по категориям
+        cursor = await db.execute(
+            """
+            SELECT category, SUM(amount) AS total
+            FROM finance_transactions
+            WHERE user_id = ? AND date >= ? AND date < ? AND type = 'income'
+            GROUP BY category
+            ORDER BY total DESC
+            """,
+            (x_user_id, start.isoformat(), end.isoformat()),
+        )
+        incomes_by_category = [dict(row) for row in await cursor.fetchall()]
+
         # Цели
         cursor = await db.execute(
             "SELECT * FROM finance_goals WHERE user_id = ? ORDER BY priority ASC, created_at DESC",
@@ -751,6 +804,7 @@ async def finance_summary(
         "expense": expense,
         "balance": balance,
         "expenses_by_category": expenses_by_category,
+        "incomes_by_category": incomes_by_category,
         "goals": goals_rows,
     }
 
@@ -825,6 +879,16 @@ def parse_user_command(message: str, user_id: str):
     msg_lower = re.sub(r'[^\w\s\.\,\-\:\;\!\?ёа-я0-9]', ' ', msg_lower)
     msg_lower = re.sub(r'\s+', ' ', msg_lower).strip()
     logger.info(f"Parsing message: {msg_lower}")
+
+    # Если это явно вопрос (есть "?") и нет сильных командных слов — ничего не делаем
+    if "?" in msg_lower:
+        strong_prefixes = (
+            "создай задачу", "добавь задачу",
+            "создай контакт", "добавь контакт",
+            "создай карточку", "добавь карточку", "добавь человека",
+        )
+        if not msg_lower.startswith(strong_prefixes):
+            return None
     
     # Создать задачу
     create_patterns = [
@@ -851,11 +915,38 @@ def parse_user_command(message: str, user_id: str):
         r'^(записаться\s+.+)',
     ]
     
+    soft_patterns = {
+        r'нужно\s+(.+)',
+        r'надо\s+(.+)',
+        r'не забыть\s+(.+)',
+    }
+    ambiguous_verbs = [
+        'подумать', 'поразмышлять', 'обсудить', 'обговорить',
+        'поговорить', 'узнать', 'поискать', 'почитать'
+    ]
+
     for pattern in create_patterns:
         match = re.search(pattern, msg_lower)
         if match:
             logger.info(f"Pattern matched: {pattern} -> {match.group(1)}")
             title = match.group(1).strip()
+            
+            # Защита от нескольких задач в одном сообщении:
+            # считаем количество глаголов-действий. Если больше 1 — просим разбить.
+            multi_verbs = [
+                'купить', 'позвонить', 'написать', 'сделать', 'проверить',
+                'отправить', 'подготовить', 'встретиться', 'забрать',
+                'оплатить', 'заказать', 'разобраться', 'записаться'
+            ]
+            verb_count = 0
+            for v in multi_verbs:
+                if re.search(rf'\b{v}\b', msg_lower):
+                    verb_count += 1
+            if verb_count > 1:
+                logger.info(f"Detected multiple actions in one message (verbs={verb_count}), asking user to split")
+                return {
+                    "action": "ask_split_tasks"
+                }
             
             # Ищем дату в формате DD.MM или DD.MM.YYYY
             date_match = re.search(r'(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?', title)
@@ -921,6 +1012,16 @@ def parse_user_command(message: str, user_id: str):
             # Если после чистки заголовок слишком длинный — обрежем
             if len(title_clean) > 120:
                 title_clean = title_clean[:117].rstrip() + '...'
+
+            # Если фраза мягкая (нужно/надо/не забыть) и содержит "размытые" глаголы — сначала уточняем
+            if pattern in soft_patterns:
+                tl = title_clean.lower() or title.lower()
+                if any(v in tl for v in ambiguous_verbs):
+                    logger.info(f"Ambiguous soft task phrase, asking for confirmation: {tl}")
+                    return {
+                        "action": "ask_task_confirmation",
+                        "title": title_clean.capitalize() if title_clean else title.capitalize(),
+                    }
             
             priority = "medium"
             if 'срочно' in msg_lower or 'важно' in msg_lower:
@@ -981,14 +1082,47 @@ def parse_user_command(message: str, user_id: str):
         if birth_date:
             data['birth_date'] = birth_date
         
-        # Парсим характеристики
+        # Парсим характеристики: роли, сильные и слабые стороны
         if rest:
-            chars = re.split(r'[,\s]+', rest)
-            chars = [c.strip() for c in chars if c.strip()]
-            if chars:
-                data['strengths'] = ', '.join(chars)
+            roles = [
+                'мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'сын', 'дочь',
+                'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега',
+                'партнер', 'партнёр', 'партнер по бизнесу', 'партнёр по бизнесу',
+                'бизнес партнер', 'бизнес-партнер', 'компаньон', 'сооснователь', 'совладелец',
+                'начальник', 'директор', 'менеджер', 'клиент',
+                'заказчик', 'поставщик', 'инвестор', 'сосед', 'знакомый'
+            ]
+            weaknesses_words = ['забывчивый', 'забывчива', 'вспыльчивый', 'вспыльчива', 
+                               'ленивый', 'ленива', 'жадный', 'жадная', 'нервный', 'нервная',
+                               'непунктуальный', 'непунктуальна', 'необязательный', 'необязательна']
+            
+            # Разбиваем по запятым / точкам с запятой
+            if ',' in rest or ';' in rest:
+                parts = [w.strip() for w in re.split(r'[,;]', rest) if w.strip()]
+            else:
+                parts = rest.split()
+            
+            found_roles = []
+            strengths = []
+            weaknesses = []
+            
+            for part in parts:
+                wl = part.lower()
+                if wl in roles or any(w in wl for w in ['партнер', 'бизнес', 'работ']):
+                    found_roles.append(part)
+                elif wl in weaknesses_words:
+                    weaknesses.append(part)
+                else:
+                    strengths.append(part)
+            
+            if found_roles:
+                data['relation'] = ', '.join(found_roles)
+            if strengths:
+                data['strengths'] = ', '.join(strengths)
+            if weaknesses:
+                data['weaknesses'] = ', '.join(weaknesses)
         
-        logger.info(f"FIO pattern with date: {fio}, birth: {birth_date}")
+        logger.info(f"FIO pattern with date: {fio}, birth: {birth_date}, data: {data}")
         
         return {
             "action": "create_person",
@@ -1012,10 +1146,14 @@ def parse_user_command(message: str, user_id: str):
             data = {}
             
             # Списки для распределения
-            roles = ['мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'сын', 'дочь',
-                     'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега', 
-                     'партнер', 'партнёр', 'начальник', 'директор', 'менеджер', 'клиент', 
-                     'заказчик', 'поставщик', 'инвестор', 'компаньон', 'сосед', 'знакомый']
+            roles = [
+                'мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'сын', 'дочь',
+                'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега',
+                'партнер', 'партнёр', 'партнер по бизнесу', 'партнёр по бизнесу',
+                'бизнес партнер', 'бизнес-партнер', 'компаньон', 'сооснователь', 'совладелец',
+                'начальник', 'директор', 'менеджер', 'клиент',
+                'заказчик', 'поставщик', 'инвестор', 'сосед', 'знакомый'
+            ]
             
             weaknesses_words = ['забывчивый', 'забывчива', 'вспыльчивый', 'вспыльчива', 
                                'ленивый', 'ленива', 'жадный', 'жадная', 'нервный', 'нервная',
@@ -1086,10 +1224,10 @@ def parse_user_command(message: str, user_id: str):
                 data['birth_date'] = birth_date
             
             if len(parts) > 1:
-                # Первая часть после ФИО - роль
-                role = parts[1].strip()
-                if role:
-                    data['role'] = role
+                # Первая часть после ФИО - роль / кем приходится
+                relation = parts[1].strip()
+                if relation:
+                    data['relation'] = relation
                 
                 # Остальное - в strengths или notes
                 if len(parts) > 2:
@@ -1105,7 +1243,7 @@ def parse_user_command(message: str, user_id: str):
                 **data
             }
     
-    # Обновление контакта: "обнови контакт Удалов..., сделай его партнёром по бизнесу"
+    # Обновление контакта: "обнови контакт Иванов..., сделай его партнёром по бизнесу"
     update_pattern = r'обнови контакт\s+(.+?)\s*(?:,|–|-)\s*(.+)'
     m_update = re.search(update_pattern, msg_lower)
     if m_update:
@@ -1113,10 +1251,14 @@ def parse_user_command(message: str, user_id: str):
         rest = m_update.group(2).strip()
         data = {}
         # Пытаемся распознать роль и характеристики аналогично созданию
-        roles = ['мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'сын', 'дочь',
-                 'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега', 
-                 'партнер', 'партнёр', 'начальник', 'директор', 'менеджер', 'клиент', 
-                 'заказчик', 'поставщик', 'инвестор', 'компаньон', 'сосед', 'знакомый']
+        roles = [
+            'мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'сын', 'дочь',
+            'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега',
+            'партнер', 'партнёр', 'партнер по бизнесу', 'партнёр по бизнесу',
+            'бизнес партнер', 'бизнес-партнер', 'компаньон', 'сооснователь', 'совладелец',
+            'начальник', 'директор', 'менеджер', 'клиент',
+            'заказчик', 'поставщик', 'инвестор', 'сосед', 'знакомый'
+        ]
         weaknesses_words = ['забывчивый', 'забывчива', 'вспыльчивый', 'вспыльчива', 
                            'ленивый', 'ленива', 'жадный', 'жадная', 'нервный', 'нервная',
                            'непунктуальный', 'непунктуальна', 'необязательный', 'необязательна']
@@ -1209,6 +1351,25 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
                 await db.commit()
                 logger.info(f"Task created successfully!")
                 return f"✅ Задача создана: {title}" + (f" (до {deadline})" if deadline else "")
+            
+            elif action_type == "ask_task_confirmation":
+                # Не уверены, что это надо превращать в задачу — спрашиваем явно
+                raw_title = action.get("title") or ""
+                return (
+                    "Я не до конца понимаю, нужно ли добавлять это как задачу:\n"
+                    f"«{raw_title}».\n\n"
+                    "Если хочешь сохранить это именно как задачу, напиши ещё раз в формате:\n"
+                    "«создай задачу …»."
+                )
+            
+            elif action_type == "ask_split_tasks":
+                # Явный ответ пользователю: пусть разделит фразу на несколько сообщений
+                return (
+                    "❗️Я вижу в одном сообщении несколько разных действий.\n"
+                    "Пожалуйста, напиши каждую задачу отдельным сообщением, например:\n"
+                    "— создай задачу позвонить Елене Кудрявской\n"
+                    "— создай задачу купить хлеб и молоко"
+                )
             
             elif action_type == "create_person":
                 fio = action.get("fio", "").strip()
@@ -1323,6 +1484,92 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
         return f"❌ Ошибка: {str(e)}"
 
 
+async def maybe_summarize_chat(user_id: str):
+    """
+    Если история чата разрослась, сжимает старые сообщения в одно резюме.
+    Логика:
+    - если записей меньше CHAT_SUMMARY_THRESHOLD — ничего не делаем;
+    - берём самые старые CHAT_SUMMARY_CHUNK сообщений и просим ИИ сделать короткое резюме;
+    - сохраняем резюме как отдельное сообщение с ролью 'system';
+    - исходные старые сообщения удаляем.
+    """
+    if not openai_client:
+        return
+    try:
+        async with aiosqlite.connect(DATABASE) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT COUNT(*) as cnt FROM chat_history WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            total = row["cnt"] if row else 0
+            if total < CHAT_SUMMARY_THRESHOLD:
+                return
+
+            # Берём самые старые сообщения
+            cursor = await db.execute(
+                """SELECT id, role, content FROM chat_history
+                   WHERE user_id = ?
+                   ORDER BY created_at ASC
+                   LIMIT ?""",
+                (user_id, CHAT_SUMMARY_CHUNK),
+            )
+            rows = await cursor.fetchall()
+            if not rows:
+                return
+
+        # Готовим запрос к ИИ для резюме
+        history_messages = [
+            {"role": r["role"], "content": r["content"]} for r in rows
+        ]
+        system_msg = {
+            "role": "system",
+            "content": (
+                "Ты помогаешь сжать историю диалога пользователя с ассистентом.\n"
+                "Сделай короткое резюме важных фактов о пользователе, его целях, задачах, людях и контексте.\n"
+                "Не пересказывай каждое сообщение, оставь только то, что может пригодиться в будущем.\n"
+                "Ответь одним абзацем на русском языке."
+            ),
+        }
+
+        model = os.getenv("AI_MODEL", "gpt-3.5-turbo")
+        if base_url and "openrouter.ai" in base_url:
+            model = os.getenv("AI_MODEL", "google/gemma-3-4b-it:free")
+        elif base_url and "vsellm.ru" in base_url:
+            model = os.getenv("AI_MODEL", "gpt-3.5-turbo")
+        elif base_url and "google" in base_url.lower():
+            model = os.getenv("AI_MODEL", "gemini-pro")
+
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=[system_msg] + history_messages,
+            max_tokens=220,
+            temperature=0.2,
+        )
+        summary_text = response.choices[0].message.content.strip()
+        if not summary_text:
+            return
+
+        # Сохраняем резюме и удаляем старые сообщения
+        ids_to_delete = [r["id"] for r in rows]
+        async with aiosqlite.connect(DATABASE) as db:
+            await db.execute(
+                "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
+                (user_id, "system", summary_text),
+            )
+            placeholders = ",".join("?" for _ in ids_to_delete)
+            params = [user_id, *ids_to_delete]
+            await db.execute(
+                f"DELETE FROM chat_history WHERE user_id = ? AND id IN ({placeholders})",
+                params,
+            )
+            await db.commit()
+        logger.info(f"Chat history summarized for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error summarizing chat for user {user_id}: {e}")
+
+
 @app.post("/api/chat")
 async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     """Чат с ИИ-ассистентом, который знает все данные пользователя."""
@@ -1341,27 +1588,51 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             "action_executed": False,
         }
 
-    # Забудь про X — удаляем сообщения, где встречается фраза
+    # Забудь про X — удаляем только те сообщения ассистента, где явно есть фраза
     forget_match = re.match(r"забудь про (.+)", text_lower)
     if forget_match:
         phrase = forget_match.group(1).strip()
         async with aiosqlite.connect(DATABASE) as db:
             like = f"%{phrase}%"
-            await db.execute(
-                "DELETE FROM chat_history WHERE user_id = ? AND LOWER(content) LIKE ?",
+            # Сначала находим кандидатов только среди ответов ассистента
+            cursor = await db.execute(
+                "SELECT id, content FROM chat_history WHERE user_id = ? AND role = 'assistant' AND LOWER(content) LIKE ?",
                 (x_user_id, like),
             )
-            await db.commit()
+            rows = await cursor.fetchall()
+            
+            # Дополнительная фильтрация в Python: ищем фразу как подстроку без жёсткого LIKE по всему
+            ids_to_delete = []
+            for row in rows:
+                content_lower = row[1].lower()
+                if phrase in content_lower:
+                    ids_to_delete.append(row[0])
+            
+            if ids_to_delete:
+                placeholders = ",".join("?" for _ in ids_to_delete)
+                params = [x_user_id, *ids_to_delete]
+                await db.execute(
+                    f"DELETE FROM chat_history WHERE user_id = ? AND id IN ({placeholders})",
+                    params,
+                )
+                await db.commit()
         return {
             "response": f"Ок, постараюсь больше не учитывать информацию про «{phrase}».",
             "action_executed": False,
         }
+
+    # Перед обычной обработкой — при необходимости сжимаем очень старую историю в резюме
+    await maybe_summarize_chat(x_user_id)
 
     # Сначала проверяем прямые команды (без ИИ)
     direct_command = parse_user_command(text_raw, x_user_id)
     if direct_command:
         result = await execute_ai_action(direct_command, x_user_id)
         logger.info(f"Direct command executed: {direct_command['action']} -> {result}")
+        
+        # Решаем, считать ли это реальным действием (меняющим данные)
+        action_type = direct_command.get("action")
+        is_real_action = action_type not in ("ask_split_tasks", "ask_task_confirmation")
         
         # Сохраняем в историю
         async with aiosqlite.connect(DATABASE) as db:
@@ -1375,7 +1646,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             )
             await db.commit()
         
-        return {"response": result, "action_executed": True}
+        return {"response": result, "action_executed": is_real_action}
     
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
@@ -1409,13 +1680,57 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             k = dict(row)
             k["tags"] = json.loads(k["tags"])
             knowledge.append(k)
+
+        # Финансы: сводка за текущий месяц + последние операции и цели
+        today = datetime.now().date()
+        start_month = today.replace(day=1)
+        if start_month.month == 12:
+            end_month = start_month.replace(year=start_month.year + 1, month=1)
+        else:
+            end_month = start_month.replace(month=start_month.month + 1)
+
+        # Доходы и расходы за месяц
+        cursor = await db.execute(
+            """
+            SELECT
+                SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) AS income,
+                SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) AS expense
+            FROM finance_transactions
+            WHERE user_id = ? AND date >= ? AND date < ?
+            """,
+            (x_user_id, start_month.isoformat(), end_month.isoformat()),
+        )
+        fin_row = await cursor.fetchone()
+        fin_income = (fin_row["income"] or 0) if fin_row else 0
+        fin_expense = (fin_row["expense"] or 0) if fin_row else 0
+        fin_balance = fin_income - fin_expense
+
+        # Последние операции (ограничим 20)
+        cursor = await db.execute(
+            """
+            SELECT date, amount, type, category, is_fixed, comment
+            FROM finance_transactions
+            WHERE user_id = ?
+            ORDER BY date DESC, id DESC
+            LIMIT 20
+            """,
+            (x_user_id,),
+        )
+        fin_last_ops = [dict(row) for row in await cursor.fetchall()]
+
+        # Цели
+        cursor = await db.execute(
+            "SELECT title, target_amount, current_amount, target_date, priority FROM finance_goals WHERE user_id = ? ORDER BY priority ASC, created_at DESC",
+            (x_user_id,),
+        )
+        fin_goals = [dict(row) for row in await cursor.fetchall()]
         
-        # Загружаем историю чата (последние 30 сообщений)
+        # Загружаем историю чата
         cursor = await db.execute(
             """SELECT role, content FROM chat_history 
                WHERE user_id = ? 
-               ORDER BY created_at DESC LIMIT 30""",
-            (x_user_id,)
+               ORDER BY created_at DESC LIMIT ?""",
+            (x_user_id, CHAT_HISTORY_LIMIT)
         )
         history_rows = await cursor.fetchall()
         chat_history = [{"role": row["role"], "content": row["content"]} for row in reversed(history_rows)]
@@ -1426,8 +1741,8 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     weekday = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"][now.weekday()]
     
     # Формируем системный промпт
-    system_prompt = f"""Ты — стратегический ИИ-ассистент YouHub.
-Твоя задача — усиливать позиции пользователя в делах, переговорах и долгосрочных решениях.
+    system_prompt = f"""Ты — стратегический ИИ-ассистент YouHub и личный финансовый консультант.
+Твоя задача — усиливать позиции пользователя в делах, переговорах, деньгах и долгосрочных решениях.
 
 У тебя есть ПАМЯТЬ — ты помнишь весь диалог с пользователем. Запоминай имя и всё важное.
 
@@ -1437,6 +1752,13 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 • Задачи ({len(active_tasks)}): {json.dumps(active_tasks, ensure_ascii=False) if active_tasks else "нет"}
 • Контакты ({len(people)}): {json.dumps(people, ensure_ascii=False) if people else "нет"} 
 • Знания ({len(knowledge)}): {json.dumps(knowledge, ensure_ascii=False) if knowledge else "нет"}
+• Финансы (текущий месяц): {{
+    "income": {fin_income},
+    "expense": {fin_expense},
+    "balance": {fin_balance}
+  }}
+• Последние операции (до 20 шт.): {json.dumps(fin_last_ops, ensure_ascii=False) if fin_last_ops else "нет"}
+• Финансовые цели: {json.dumps(fin_goals, ensure_ascii=False) if fin_goals else "нет"}
 
 🎯 Формат ответа (всегда):
 1) Краткий вывод (1–2 предложения).
@@ -1451,6 +1773,16 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 📋 Когда вопрос про ЗАДАЧИ и дела:
 - Помогай расставить приоритеты и отсечь лишнее.
 - Строй план действий на 2–3 шага вперёд, с минимальными затратами.
+
+👥 Данные по людям:
+- У контактов могут быть поля сильных сторон (strengths) и слабых сторон (weaknesses).
+- Всегда учитывай их в советах: на что можно опереться и чего лучше избегать во взаимодействии.
+
+💰 Когда вопрос про ФИНАНСЫ:
+- Анализируй картину: доходы, расходы, баланс, цели, регулярные траты.
+- Помогай выстроить базовый бюджет, приоритеты по целям и понятные лимиты по категориям.
+- Объясняй простыми словами, как улучшить финансовое здоровье (резерв, долги, крупные покупки).
+- Не давай конкретных инвестсоветов по отдельным акциям/крипте, сосредоточься на личных финансах и рисках.
 
 📌 Правила:
 - Пиши КРАТКО: без воды, без морализаторства, максимум пользы.
@@ -1499,9 +1831,9 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             )
             await db.execute(
                 """DELETE FROM chat_history WHERE user_id = ? AND id NOT IN (
-                    SELECT id FROM chat_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
+                    SELECT id FROM chat_history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
                 )""",
-                (x_user_id, x_user_id)
+                (x_user_id, x_user_id, CHAT_HISTORY_LIMIT)
             )
             await db.commit()
         
@@ -1523,6 +1855,27 @@ async def clear_chat_history(x_user_id: str = Header(...)):
         await db.execute("DELETE FROM chat_history WHERE user_id = ?", (x_user_id,))
         await db.commit()
     return {"status": "ok"}
+
+
+@app.get("/api/chat/history")
+async def get_chat_history(x_user_id: str = Header(...), limit: int = Query(50, ge=1, le=200)):
+    """
+    Получить последние сообщения диалога для отображения в UI.
+    Возвращаем role + content в хронологическом порядке.
+    """
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT role, content FROM chat_history 
+               WHERE user_id = ?
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (x_user_id, limit),
+        )
+        rows = await cursor.fetchall()
+    # Возвращаем в хронологическом порядке (от старых к новым)
+    history = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    return {"history": history}
 
 
 if __name__ == "__main__":

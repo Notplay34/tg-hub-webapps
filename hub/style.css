@@ -442,6 +442,12 @@ body {
     font-weight: 500;
 }
 
+.card-meta .meta-pill {
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+}
+
 .card-meta .overdue { 
     color: var(--danger);
     font-weight: 600;
@@ -910,6 +916,43 @@ body {
     margin-bottom: 12px;
 }
 
+.chat-help {
+    margin-top: 16px;
+    text-align: left;
+    background: rgba(255,255,255,0.03);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font-size: 12px;
+}
+
+.chat-help-title {
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text);
+}
+
+.chat-help ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.chat-help li span {
+    font-weight: 500;
+}
+
+.chat-help code {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(0,0,0,0.4);
+    font-size: 11px;
+}
+
 .chat-messages {
     flex: 1;
     display: flex;
@@ -936,6 +979,16 @@ body {
     align-self: flex-start;
     background: var(--bg-secondary);
     border-bottom-left-radius: 4px;
+}
+
+.chat-msg.ai.action {
+    border-left: 3px solid var(--accent);
+}
+
+.chat-msg-meta {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 4px;
 }
 
 .chat-input-container {
@@ -1056,6 +1109,36 @@ body {
     font-size: 15px;
     margin-bottom: 8px;
 }
+
+.finance-month-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.finance-month-label {
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: capitalize;
+}
+
+.month-btn {
+    border: none;
+    border-radius: 999px;
+    padding: 4px 8px;
+    font-size: 13px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.finance-summary-text {
+    margin-bottom: 12px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
 .finance-list {
     list-style: none;
     margin: 0;
@@ -1103,6 +1186,27 @@ body {
 .goal-progress .text {
     font-size: 11px;
     color: var(--text-secondary);
+}
+
+.finance-tags {
+    display: none;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+.finance-tags button {
+    border: none;
+    border-radius: 999px;
+    padding: 4px 8px;
+    font-size: 11px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.finance-tags button:active {
+    opacity: 0.7;
 }
 
 .finance-actions {
