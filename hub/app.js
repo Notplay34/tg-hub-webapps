@@ -129,8 +129,6 @@ const Nav = {
             // Обновляем экраны при переходе
             if (screenId === 'statsScreen') {
                 Today.render();
-            } else if (screenId === 'timelineScreen') {
-                Timeline.load();
             }
         }
     }
@@ -140,6 +138,9 @@ const Nav = {
 let tasksData = [];
 let peopleData = [];
 let knowledgeData = [];
+let financeSummary = null;
+let financeTransactions = [];
+let financeGoals = [];
 
 async function loadAllData(showLoading = true) {
     if (showLoading) {
@@ -167,6 +168,7 @@ async function loadAllData(showLoading = true) {
         Tasks.render();
         People.render();
         Knowledge.render();
+        // Финансовый экран подгружаем отдельно при открытии/инициализации
     } catch (e) {
         console.error('Load error:', e);
         hideLoadingState('tasks');
@@ -1461,17 +1463,12 @@ async function init() {
         if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
     });
     
-    initPullToRefresh('timelineContent', async () => {
-        await Timeline.load();
-        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
-    });
-    
     await loadAllData();
-    await Timeline.load();
     Today.render();
     Tasks.render();
     People.render();
     Knowledge.render();
+    await Finance.load();
     
     // Закрытие модалов
     document.querySelectorAll('.modal').forEach(m => {
@@ -1482,3 +1479,198 @@ async function init() {
 }
 
 init();
+
+// === ФИНАНСЫ ===
+const Finance = {
+    async load(month = null) {
+        try {
+            const query = month ? `?month=${month}` : '';
+            const summary = await API.request('GET', `/api/finance/summary${query}`);
+            const txs = await API.request('GET', `/api/finance/transactions${query}`);
+            financeSummary = summary;
+            financeTransactions = txs;
+            financeGoals = summary.goals || [];
+            this.render();
+        } catch (e) {
+            console.error('Finance load error:', e);
+            const empty = document.getElementById('financeEmpty');
+            if (empty) {
+                empty.textContent = 'Ошибка загрузки финансовых данных';
+            }
+        }
+    },
+    
+    render() {
+        const container = document.getElementById('financeContent');
+        if (!container) return;
+        
+        if (!financeSummary) {
+            container.innerHTML = '<div class="empty">Нет данных. Добавьте доходы и расходы.</div>';
+            return;
+        }
+        
+        const income = financeSummary.income || 0;
+        const expense = financeSummary.expense || 0;
+        const balance = financeSummary.balance || 0;
+        const byCat = financeSummary.expenses_by_category || [];
+        const goals = financeGoals || [];
+        
+        container.innerHTML = `
+            <div class="finance-block">
+                <div class="finance-actions">
+                    <button class="btn-primary" onclick="Finance.openTxModal()">💸 Добавить операцию</button>
+                </div>
+
+                <div class="finance-summary">
+                    <div class="finance-card income">
+                        <div class="label">Доход</div>
+                        <div class="value">+${income.toFixed(0)}</div>
+                    </div>
+                    <div class="finance-card expense">
+                        <div class="label">Расход</div>
+                        <div class="value">-${expense.toFixed(0)}</div>
+                    </div>
+                    <div class="finance-card balance">
+                        <div class="label">Остаток</div>
+                        <div class="value">${balance.toFixed(0)}</div>
+                    </div>
+                </div>
+                
+                <h3>Расходы по категориям</h3>
+                ${byCat.length === 0 ? '<div class="empty small">Пока нет расходов</div>' : `
+                <ul class="finance-list">
+                    ${byCat.map(c => `
+                        <li>
+                            <span>${Utils.escape(c.category)}</span>
+                            <span class="amount">-${c.total.toFixed(0)}</span>
+                        </li>
+                    `).join('')}
+                </ul>`}
+            </div>
+            
+            <div class="finance-block">
+                <div class="finance-actions">
+                    <button class="btn-secondary" onclick="Finance.openGoalModal()">🎯 Добавить цель</button>
+                </div>
+                
+                <h3>Цели</h3>
+                ${goals.length === 0 ? '<div class="empty small">Цели ещё не созданы</div>' : `
+                <ul class="finance-goals">
+                    ${goals.map(g => {
+                        const target = g.target_amount || 0;
+                        const current = g.current_amount || 0;
+                        const pct = target > 0 ? Math.min(100, Math.round(current / target * 100)) : 0;
+                        return `
+                            <li>
+                                <div class="goal-title">${Utils.escape(g.title)}</div>
+                                <div class="goal-progress">
+                                    <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
+                                    <div class="text">${current.toFixed(0)} / ${target.toFixed(0)} (${pct}%)</div>
+                                </div>
+                            </li>
+                        `;
+                    }).join('')}
+                </ul>`}
+            </div>
+        `;
+    },
+    
+    openTxModal() {
+        const modal = document.getElementById('financeTxModal');
+        if (!modal) return;
+        document.getElementById('txType').value = 'expense';
+        document.getElementById('txDate').value = Utils.today();
+        document.getElementById('txAmount').value = '';
+        document.getElementById('txCategory').value = '';
+        document.getElementById('txIsFixed').checked = false;
+        document.getElementById('txComment').value = '';
+        modal.classList.add('open');
+    },
+    
+    closeTxModal() {
+        const modal = document.getElementById('financeTxModal');
+        if (modal) modal.classList.remove('open');
+    },
+    
+    async saveTransaction() {
+        const type = document.getElementById('txType').value;
+        const date = document.getElementById('txDate').value || Utils.today();
+        const amountStr = document.getElementById('txAmount').value;
+        const category = document.getElementById('txCategory').value.trim() || 'Прочее';
+        const isFixed = document.getElementById('txIsFixed').checked;
+        const comment = document.getElementById('txComment').value.trim();
+        
+        const amount = parseFloat(amountStr);
+        if (!amount || amount <= 0) {
+            return (tg?.showAlert ? tg.showAlert('Введите сумму операции') : alert('Введите сумму операции'));
+        }
+        
+        try {
+            await API.request('POST', '/api/finance/transactions', {
+                type,
+                date,
+                amount,
+                category,
+                is_fixed: isFixed,
+                comment
+            });
+            this.closeTxModal();
+            await this.load();
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        } catch (e) {
+            console.error('Finance tx save error:', e);
+            const msg = e.message || 'Ошибка сохранения операции';
+            if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
+        }
+    },
+    
+    openGoalModal() {
+        const modal = document.getElementById('financeGoalModal');
+        if (!modal) return;
+        document.getElementById('goalTitle').value = '';
+        document.getElementById('goalTarget').value = '';
+        document.getElementById('goalCurrent').value = '';
+        document.getElementById('goalDate').value = '';
+        document.getElementById('goalPriority').value = '1';
+        modal.classList.add('open');
+    },
+    
+    closeGoalModal() {
+        const modal = document.getElementById('financeGoalModal');
+        if (modal) modal.classList.remove('open');
+    },
+    
+    async saveGoal() {
+        const title = document.getElementById('goalTitle').value.trim();
+        const targetStr = document.getElementById('goalTarget').value;
+        const currentStr = document.getElementById('goalCurrent').value || '0';
+        const target_date = document.getElementById('goalDate').value || null;
+        const priority = parseInt(document.getElementById('goalPriority').value) || 1;
+        
+        if (!title) {
+            return (tg?.showAlert ? tg.showAlert('Введите название цели') : alert('Введите название цели'));
+        }
+        const target_amount = parseFloat(targetStr);
+        const current_amount = parseFloat(currentStr) || 0;
+        if (!target_amount || target_amount <= 0) {
+            return (tg?.showAlert ? tg.showAlert('Введите корректную целевую сумму') : alert('Введите корректную целевую сумму'));
+        }
+        
+        try {
+            await API.request('POST', '/api/finance/goals', {
+                title,
+                target_amount,
+                current_amount,
+                target_date,
+                priority
+            });
+            this.closeGoalModal();
+            await this.load();
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        } catch (e) {
+            console.error('Finance goal save error:', e);
+            const msg = e.message || 'Ошибка сохранения цели';
+            if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
+        }
+    }
+};

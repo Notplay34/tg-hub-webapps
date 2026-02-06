@@ -158,21 +158,15 @@
             </div>
         </section>
 
-        <!-- ===== TIMELINE ===== -->
-        <section class="screen" id="timelineScreen">
+        <!-- ===== ФИНАНСЫ ===== -->
+        <section class="screen" id="financeScreen">
             <header class="header">
-                <h1>Timeline</h1>
+                <h1>Финансы</h1>
             </header>
             
-            <main class="content timeline-content" id="timelineContent">
-                <div class="pull-refresh" id="timelinePullRefresh">
-                    <div class="pull-refresh-icon">↓</div>
-                    <div>Потяните для обновления</div>
-                </div>
-                <div id="timelineList"></div>
+            <main class="content" id="financeContent">
+                <div class="empty" id="financeEmpty">Нет данных. Добавьте доходы и расходы.</div>
             </main>
-            <div class="empty" id="timelineEmpty">Нет событий</div>
-            <div class="loading" id="timelineLoading">⏳ Загрузка...</div>
         </section>
 
         <!-- ===== ИИ АССИСТЕНТ ===== -->
@@ -214,9 +208,9 @@
                 <span class="nav-icon">📚</span>
                 <span class="nav-label">База</span>
             </button>
-            <button class="nav-item" data-screen="timelineScreen">
-                <span class="nav-icon">📅</span>
-                <span class="nav-label">Timeline</span>
+            <button class="nav-item" data-screen="financeScreen">
+                <span class="nav-icon">💰</span>
+                <span class="nav-label">Финансы</span>
             </button>
             <button class="nav-item" data-screen="aiScreen">
                 <span class="nav-icon">🤖</span>
@@ -288,6 +282,93 @@
                     </div>
                 </form>
                 <button class="btn-delete" id="taskDelete" onclick="Tasks.delete()">Удалить</button>
+            </div>
+        </div>
+
+        <!-- Финансы: операция -->
+        <div class="modal" id="financeTxModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="Finance.closeTxModal()">×</button>
+                    <h2>Новая операция</h2>
+                    <button class="btn-save" onclick="Finance.saveTransaction()">✓</button>
+                </div>
+                <form id="financeTxForm" onsubmit="return false">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Тип</label>
+                            <select id="txType">
+                                <option value="expense">Расход</option>
+                                <option value="income">Доход</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Дата</label>
+                            <input type="date" id="txDate">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Сумма</label>
+                            <input type="number" id="txAmount" step="0.01" placeholder="0">
+                        </div>
+                        <div class="form-group">
+                            <label>Категория</label>
+                            <input type="text" id="txCategory" placeholder="Еда, аренда, транспорт...">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="txIsFixed">
+                            <span>Обязательный расход</span>
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label>Комментарий</label>
+                        <textarea id="txComment" rows="2" placeholder="Описание операции"></textarea>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Финансы: цель -->
+        <div class="modal" id="financeGoalModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="Finance.closeGoalModal()">×</button>
+                    <h2>Новая цель</h2>
+                    <button class="btn-save" onclick="Finance.saveGoal()">✓</button>
+                </div>
+                <form id="financeGoalForm" onsubmit="return false">
+                    <div class="form-group">
+                        <label>Цель</label>
+                        <input type="text" id="goalTitle" placeholder="Например: подушка безопасности" required>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Целевая сумма</label>
+                            <input type="number" id="goalTarget" step="0.01" placeholder="0" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Уже накоплено</label>
+                            <input type="number" id="goalCurrent" step="0.01" placeholder="0">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Срок</label>
+                            <input type="date" id="goalDate">
+                        </div>
+                        <div class="form-group">
+                            <label>Приоритет</label>
+                            <select id="goalPriority">
+                                <option value="1">Высокий</option>
+                                <option value="2">Средний</option>
+                                <option value="3">Низкий</option>
+                            </select>
+                        </div>
+                    </div>
+                </form>
             </div>
         </div>
 

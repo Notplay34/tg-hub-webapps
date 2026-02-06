@@ -3,7 +3,7 @@ API для TG Hub — хранение данных на сервере.
 """
 
 import os
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -112,6 +112,24 @@ class ChatMessage(BaseModel):
     message: str
 
 
+class FinanceTransaction(BaseModel):
+    date: str  # YYYY-MM-DD
+    amount: float  # + доход, - расход
+    type: str  # "income" or "expense"
+    category: str
+    is_fixed: bool = False
+    person_id: Optional[int] = None
+    comment: Optional[str] = ""
+
+
+class FinanceGoal(BaseModel):
+    title: str
+    target_amount: float
+    current_amount: float = 0
+    target_date: Optional[str] = None  # YYYY-MM-DD
+    priority: int = 1
+
+
 # === База данных ===
 
 async def init_db():
@@ -190,6 +208,34 @@ async def init_db():
                 entity_id INTEGER NOT NULL,
                 entity_title TEXT,
                 details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS finance_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                date DATE NOT NULL,
+                amount REAL NOT NULL,
+                type TEXT NOT NULL, -- income / expense
+                category TEXT NOT NULL,
+                is_fixed INTEGER DEFAULT 0,
+                person_id INTEGER,
+                comment TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS finance_goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                target_amount REAL NOT NULL,
+                current_amount REAL DEFAULT 0,
+                target_date DATE,
+                priority INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -540,6 +586,173 @@ async def get_knowledge(x_user_id: str = Header(...)):
             item['tags'] = json.loads(item['tags'])
             result.append(item)
         return result
+
+
+# === ФИНАНСЫ ===
+
+@app.post("/api/finance/transactions")
+async def create_transaction(tx: FinanceTransaction, x_user_id: str = Header(...)):
+    if tx.type not in ("income", "expense"):
+        raise HTTPException(status_code=400, detail="type должен быть 'income' или 'expense'")
+    if not tx.date:
+        raise HTTPException(status_code=400, detail="Нужна дата транзакции")
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO finance_transactions
+            (user_id, date, amount, type, category, is_fixed, person_id, comment)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                x_user_id,
+                tx.date,
+                tx.amount,
+                tx.type,
+                tx.category,
+                int(tx.is_fixed),
+                tx.person_id,
+                tx.comment,
+            ),
+        )
+        await db.commit()
+        return {"id": cursor.lastrowid}
+
+
+@app.get("/api/finance/transactions")
+async def list_transactions(
+    x_user_id: str = Header(...),
+    month: Optional[str] = Query(None, description="YYYY-MM"),
+):
+    """Список транзакций за месяц (по умолчанию — текущий)."""
+    today = datetime.now().date()
+    if month:
+        try:
+            year, m = month.split("-")
+            year = int(year)
+            m = int(m)
+            start = datetime(year, m, 1).date()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Неверный формат month, нужно YYYY-MM")
+    else:
+        start = today.replace(day=1)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM finance_transactions
+            WHERE user_id = ? AND date >= ? AND date < ?
+            ORDER BY date DESC, id DESC
+            """,
+            (x_user_id, start.isoformat(), end.isoformat()),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+@app.post("/api/finance/goals")
+async def create_goal(goal: FinanceGoal, x_user_id: str = Header(...)):
+    if goal.target_amount <= 0:
+        raise HTTPException(status_code=400, detail="target_amount должен быть > 0")
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO finance_goals
+            (user_id, title, target_amount, current_amount, target_date, priority)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                x_user_id,
+                goal.title,
+                goal.target_amount,
+                goal.current_amount,
+                goal.target_date,
+                goal.priority,
+            ),
+        )
+        await db.commit()
+        return {"id": cursor.lastrowid}
+
+
+@app.get("/api/finance/goals")
+async def list_goals(x_user_id: str = Header(...)):
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM finance_goals WHERE user_id = ? ORDER BY priority ASC, created_at DESC",
+            (x_user_id,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+@app.get("/api/finance/summary")
+async def finance_summary(
+    x_user_id: str = Header(...),
+    month: Optional[str] = Query(None, description="YYYY-MM"),
+):
+    """Сводка по финансам за месяц."""
+    today = datetime.now().date()
+    if month:
+        try:
+            year, m = month.split("-")
+            year = int(year)
+            m = int(m)
+            start = datetime(year, m, 1).date()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Неверный формат month, нужно YYYY-MM")
+    else:
+        start = today.replace(day=1)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        # Доходы и расходы
+        cursor = await db.execute(
+            """
+            SELECT
+                SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) AS income,
+                SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) AS expense
+            FROM finance_transactions
+            WHERE user_id = ? AND date >= ? AND date < ?
+            """,
+            (x_user_id, start.isoformat(), end.isoformat()),
+        )
+        row = await cursor.fetchone()
+        income = row["income"] or 0
+        expense = row["expense"] or 0
+        balance = income - expense
+
+        # Расходы по категориям
+        cursor = await db.execute(
+            """
+            SELECT category, SUM(amount) AS total
+            FROM finance_transactions
+            WHERE user_id = ? AND date >= ? AND date < ? AND type = 'expense'
+            GROUP BY category
+            ORDER BY total DESC
+            """,
+            (x_user_id, start.isoformat(), end.isoformat()),
+        )
+        expenses_by_category = [dict(row) for row in await cursor.fetchall()]
+
+        # Цели
+        cursor = await db.execute(
+            "SELECT * FROM finance_goals WHERE user_id = ? ORDER BY priority ASC, created_at DESC",
+            (x_user_id,),
+        )
+        goals_rows = [dict(row) for row in await cursor.fetchall()]
+
+    return {
+        "income": income,
+        "expense": expense,
+        "balance": balance,
+        "expenses_by_category": expenses_by_category,
+        "goals": goals_rows,
+    }
 
 
 @app.post("/api/knowledge")
