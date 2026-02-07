@@ -1191,6 +1191,7 @@ body {
 }
 .finance-tx-amount.income { color: #4caf50; }
 .finance-tx-amount.expense { color: #e53935; }
+.finance-tx-amount.savings { color: var(--accent); }
 .finance-tx-meta {
     font-size: 12px;
     color: var(--text-secondary);
@@ -1225,6 +1226,16 @@ body {
     font-size: 15px;
     margin-bottom: 8px;
 }
+.finance-goals-heading {
+    font-size: 15px;
+    margin-bottom: 10px;
+    font-weight: 600;
+}
+.finance-goals-heading .finance-goals-total {
+    color: var(--accent);
+    font-weight: 700;
+    margin-left: 6px;
+}
 
 .finance-month-bar {
     display: flex;
@@ -1250,6 +1261,19 @@ body {
     cursor: pointer;
 }
 
+.finance-carryover {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    padding: 6px 0;
+}
+.finance-carryover .finance-total {
+    color: var(--text);
+    font-weight: 600;
+}
 .finance-summary-text {
     margin-bottom: 12px;
     font-size: 13px;

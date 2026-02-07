@@ -1529,6 +1529,18 @@ async function init() {
             if (e.target === m) m.classList.remove('open');
         });
     });
+
+    // Автопереключение на текущий месяц при возврате в приложение (смена месяца в календаре)
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible') return;
+        const financeScreen = document.getElementById('financeScreen');
+        if (!financeScreen || !financeScreen.classList.contains('active')) return;
+        const now = new Date();
+        const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        if (Finance.currentMonth && Finance.currentMonth !== currentMonthStr) {
+            Finance.load();
+        }
+    });
 }
 
 init();
@@ -1585,6 +1597,8 @@ const Finance = {
         const income = Number(financeSummary.income) || 0;
         const expense = Number(financeSummary.expense) || 0;
         const balance = Number(financeSummary.balance) ?? (income - expense);
+        const previousBalance = Number(financeSummary.previous_balance) || 0;
+        const totalWithCarryover = previousBalance + balance;
         const goals = Array.isArray(financeGoals) ? financeGoals : [];
         const txs = Array.isArray(financeTransactions) ? financeTransactions : [];
         const monthLabel = this.formatMonthLabel(this.currentMonth);
@@ -1609,8 +1623,13 @@ const Finance = {
         }
         const totalFiltered = filtered.reduce((sum, t) => {
             const amt = Number(t.amount) || 0;
-            return sum + ((t.type || '').toLowerCase() === 'income' ? amt : -amt);
+            const type = (t.type || '').toLowerCase();
+            if (type === 'income') return sum + amt;
+            if (type === 'expense') return sum - amt;
+            return sum;
         }, 0);
+
+        const goalsTotalSum = goals.reduce((s, g) => s + (Number(g.current_amount) || 0), 0);
 
         let summaryText = '';
         if (!income && !expense) {
@@ -1653,6 +1672,10 @@ const Finance = {
                         <div class="value">${balance.toFixed(0)}</div>
                     </div>
                 </div>
+                <div class="finance-carryover">
+                    <span class="finance-initial">Начальный остаток: ${previousBalance.toFixed(0)}</span>
+                    <span class="finance-total">Итого: ${totalWithCarryover.toFixed(0)}</span>
+                </div>
                 <div class="finance-summary-text">${summaryText}</div>
 
                 ${(this.filterType === 'income' || this.filterType === 'expense') && categoriesForType.length > 0 ? `
@@ -1676,10 +1699,10 @@ const Finance = {
             </div>
 
             <div class="finance-block">
+                <h3 class="finance-goals-heading">Цели <span class="finance-goals-total">${goalsTotalSum.toFixed(0)}</span></h3>
                 <div class="finance-actions">
                     <button class="btn-secondary" onclick="Finance.openGoalModal()">🎯 Добавить цель</button>
                 </div>
-                <h3>Цели</h3>
                 ${goals.length === 0 ? '<div class="empty small show">Цели ещё не созданы</div>' : `
                 <ul class="finance-goals">
                     ${goals.map(g => {
@@ -1713,15 +1736,19 @@ const Finance = {
     },
 
     renderTxItem(t) {
-        const isIncome = (t.type || '').toLowerCase() === 'income';
+        const type = (t.type || '').toLowerCase();
+        const isIncome = type === 'income';
+        const isSavings = type === 'savings';
         const amount = Number(t.amount) || 0;
         const dateStr = t.date ? Utils.formatDate(t.date) : '';
+        const amountClass = isSavings ? 'savings' : (isIncome ? 'income' : 'expense');
+        const amountSign = isSavings || isIncome ? '+' : '-';
         return `
             <li class="finance-tx-item" onclick="Finance.openTxModal(${t.id})" data-tx-id="${t.id}">
                 <button type="button" class="finance-tx-delete" onclick="event.stopPropagation();Finance.deleteTransaction(${t.id})" title="Удалить">×</button>
                 <div class="finance-tx-main">
                     <span class="finance-tx-cat">${Utils.escape(t.category || 'Прочее')}</span>
-                    <span class="finance-tx-amount ${isIncome ? 'income' : 'expense'}">${isIncome ? '+' : '-'}${amount.toFixed(0)}</span>
+                    <span class="finance-tx-amount ${amountClass}">${amountSign}${amount.toFixed(0)}</span>
                 </div>
                 <div class="finance-tx-meta">${dateStr}${t.comment ? ' · ' + Utils.escape(t.comment) : ''}</div>
             </li>
@@ -1906,11 +1933,19 @@ const Finance = {
             }
             if (mode === 'defer') {
                 await API.request('POST', '/api/finance/transactions', {
-                    type: 'income',
+                    type: 'savings',
                     date: Utils.today(),
                     amount: sum,
-                    category: 'Сбережения',
-                    comment: `Пополнение цели: ${goalTitle}`
+                    category: 'Сбережения в копилку',
+                    comment: goalTitle
+                });
+            } else if (mode === 'balance') {
+                await API.request('POST', '/api/finance/transactions', {
+                    type: 'expense',
+                    date: Utils.today(),
+                    amount: sum,
+                    category: 'В цель',
+                    comment: goalTitle
                 });
             }
             await this.load();

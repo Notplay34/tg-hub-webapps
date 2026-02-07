@@ -650,8 +650,8 @@ async def get_knowledge(x_user_id: str = Header(...)):
 
 @app.post("/api/finance/transactions")
 async def create_transaction(tx: FinanceTransaction, x_user_id: str = Header(...)):
-    if tx.type not in ("income", "expense"):
-        raise HTTPException(status_code=400, detail="type должен быть 'income' или 'expense'")
+    if tx.type not in ("income", "expense", "savings"):
+        raise HTTPException(status_code=400, detail="type должен быть 'income', 'expense' или 'savings'")
     if not tx.date:
         raise HTTPException(status_code=400, detail="Нужна дата транзакции")
     async with aiosqlite.connect(DATABASE) as db:
@@ -726,8 +726,8 @@ async def update_transaction(tx_id: int, body: FinanceTransactionUpdate, x_user_
             updates.append("amount = ?")
             params.append(body.amount)
         if body.type is not None:
-            if body.type not in ("income", "expense"):
-                raise HTTPException(status_code=400, detail="type должен быть 'income' или 'expense'")
+            if body.type not in ("income", "expense", "savings"):
+                raise HTTPException(status_code=400, detail="type должен быть 'income', 'expense' или 'savings'")
             updates.append("type = ?")
             params.append(body.type)
         if body.category is not None:
@@ -874,7 +874,28 @@ async def finance_summary(
         end = start.replace(month=start.month + 1)
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
-        # Доходы и расходы
+        # Остаток предыдущего месяца (перенос)
+        if start.month == 1:
+            start_prev = start.replace(year=start.year - 1, month=12)
+        else:
+            start_prev = start.replace(month=start.month - 1)
+        end_prev = start
+        cursor = await db.execute(
+            """
+            SELECT
+                SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) AS income_prev,
+                SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) AS expense_prev
+            FROM finance_transactions
+            WHERE user_id = ? AND date >= ? AND date < ?
+            """,
+            (x_user_id, start_prev.isoformat(), end_prev.isoformat()),
+        )
+        row_prev = await cursor.fetchone()
+        income_prev = row_prev["income_prev"] or 0
+        expense_prev = row_prev["expense_prev"] or 0
+        previous_balance = income_prev - expense_prev
+
+        # Доходы и расходы за выбранный месяц
         cursor = await db.execute(
             """
             SELECT
@@ -927,6 +948,7 @@ async def finance_summary(
         "income": income,
         "expense": expense,
         "balance": balance,
+        "previous_balance": previous_balance,
         "expenses_by_category": expenses_by_category,
         "incomes_by_category": incomes_by_category,
         "goals": goals_rows,
