@@ -153,6 +153,11 @@ class FinanceGoalUpdate(BaseModel):
     priority: Optional[int] = None
 
 
+class FinanceLimit(BaseModel):
+    category: str
+    amount: float
+
+
 # === База данных ===
 
 async def init_db():
@@ -267,6 +272,17 @@ async def init_db():
                 target_date DATE,
                 priority INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS finance_limits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount REAL NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, category)
             )
         """)
         
@@ -847,6 +863,64 @@ async def delete_goal(goal_id: int, x_user_id: str = Header(...)):
         if not await cursor.fetchone():
             raise HTTPException(status_code=404, detail="Цель не найдена")
         await db.execute("DELETE FROM finance_goals WHERE id = ? AND user_id = ?", (goal_id, x_user_id))
+        await db.commit()
+        return {"ok": True}
+
+
+@app.get("/api/finance/limits")
+async def list_limits(x_user_id: str = Header(...)):
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM finance_limits WHERE user_id = ? ORDER BY category",
+            (x_user_id,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+@app.post("/api/finance/limits")
+async def create_limit(limit: FinanceLimit, x_user_id: str = Header(...)):
+    if limit.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount должен быть > 0")
+    async with aiosqlite.connect(DATABASE) as db:
+        try:
+            cursor = await db.execute(
+                "INSERT INTO finance_limits (user_id, category, amount) VALUES (?, ?, ?)",
+                (x_user_id, limit.category.strip() or "Прочее", limit.amount),
+            )
+            await db.commit()
+            return {"id": cursor.lastrowid}
+        except aiosqlite.IntegrityError:
+            raise HTTPException(status_code=400, detail="Лимит для этой категории уже есть")
+
+
+@app.patch("/api/finance/limits/{limit_id}")
+async def update_limit(limit_id: int, limit: FinanceLimit, x_user_id: str = Header(...)):
+    if limit.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount должен быть > 0")
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            "SELECT id FROM finance_limits WHERE id = ? AND user_id = ?", (limit_id, x_user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Лимит не найден")
+        await db.execute(
+            "UPDATE finance_limits SET category = ?, amount = ? WHERE id = ? AND user_id = ?",
+            (limit.category.strip() or "Прочее", limit.amount, limit_id, x_user_id),
+        )
+        await db.commit()
+        return {"ok": True}
+
+
+@app.delete("/api/finance/limits/{limit_id}")
+async def delete_limit(limit_id: int, x_user_id: str = Header(...)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            "SELECT id FROM finance_limits WHERE id = ? AND user_id = ?", (limit_id, x_user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Лимит не найден")
+        await db.execute("DELETE FROM finance_limits WHERE id = ? AND user_id = ?", (limit_id, x_user_id))
         await db.commit()
         return {"ok": True}
 

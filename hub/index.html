@@ -403,6 +403,37 @@
             </div>
         </div>
 
+        <!-- Финансы: лимиты по категориям -->
+        <div class="modal" id="financeLimitsModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="Finance.closeLimitsModal()">×</button>
+                    <h2>Лимиты на месяц</h2>
+                </div>
+                <div id="financeLimitsForm" class="finance-limits-form" style="display:none">
+                    <input type="hidden" id="limitId">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Категория</label>
+                            <input type="text" id="limitCategory" placeholder="Еда, транспорт...">
+                        </div>
+                        <div class="form-group">
+                            <label>Лимит (₽)</label>
+                            <input type="number" id="limitAmount" step="0.01" min="0.01" placeholder="0">
+                        </div>
+                    </div>
+                    <div class="form-actions-inline">
+                        <button type="button" class="btn-primary" onclick="Finance.saveLimit()">Сохранить</button>
+                        <button type="button" class="btn-secondary" onclick="Finance.cancelLimitForm()">Отмена</button>
+                    </div>
+                </div>
+                <div id="financeLimitsListWrap">
+                    <div id="financeLimitsList"></div>
+                    <button type="button" class="btn-secondary finance-add-limit-btn" onclick="Finance.showAddLimitForm()">+ Добавить лимит</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Человек -->
         <div class="modal" id="personModal">
             <div class="modal-content modal-full">

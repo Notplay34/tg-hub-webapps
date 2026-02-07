@@ -145,6 +145,7 @@ let knowledgeData = [];
 let financeSummary = null;
 let financeTransactions = [];
 let financeGoals = [];
+let financeLimits = [];
 
 async function loadAllData(showLoading = true) {
     if (showLoading) {
@@ -1655,6 +1656,7 @@ const Finance = {
                 </div>
                 <div class="finance-actions">
                     <button class="btn-primary" onclick="Finance.openTxModal()">💸 Добавить операцию</button>
+                    <button class="btn-secondary" onclick="Finance.openLimitsModal()">📊 Лимиты</button>
                 </div>
                 <div class="finance-summary">
                     <div class="${cardClass('income')}" onclick="Finance.setFilterType('income')" role="button">
@@ -2006,5 +2008,132 @@ const Finance = {
             const msg = e.message || 'Ошибка сохранения цели';
             if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
         }
+    },
+
+    async loadLimits() {
+        try {
+            const data = await API.request('GET', '/api/finance/limits');
+            financeLimits = Array.isArray(data) ? data : [];
+        } catch (e) {
+            console.error('Finance limits load error:', e);
+            financeLimits = [];
+        }
+    },
+
+    async openLimitsModal() {
+        await this.loadLimits();
+        this.cancelLimitForm();
+        this.renderLimitsList();
+        const modal = document.getElementById('financeLimitsModal');
+        if (modal) modal.classList.add('open');
+    },
+
+    closeLimitsModal() {
+        const modal = document.getElementById('financeLimitsModal');
+        if (modal) modal.classList.remove('open');
+    },
+
+    renderLimitsList() {
+        const listEl = document.getElementById('financeLimitsList');
+        const formWrap = document.getElementById('financeLimitsForm');
+        const listWrap = document.getElementById('financeLimitsListWrap');
+        if (!listEl || !listWrap) return;
+        const arr = (financeSummary && financeSummary.expenses_by_category) ? financeSummary.expenses_by_category : [];
+        const byCat = {};
+        arr.forEach(r => { byCat[r.category] = (r.total != null ? r.total : 0); });
+        if (financeLimits.length === 0) {
+            listEl.innerHTML = '<p class="finance-limits-empty">Лимиты не заданы. Добавьте лимит по категории расходов.</p>';
+        } else {
+            listEl.innerHTML = financeLimits.map(l => {
+                const spent = typeof byCat[l.category] === 'number' ? byCat[l.category] : 0;
+                const limit = parseFloat(l.amount) || 0;
+                const pct = limit > 0 ? Math.min(100, (spent / limit) * 100) : 0;
+                const over = spent > limit;
+                return `
+                    <div class="finance-limit-row" data-limit-id="${l.id}">
+                        <div class="finance-limit-info">
+                            <span class="finance-limit-cat">${Utils.escape(l.category)}</span>
+                            <span class="finance-limit-amounts">${Number(spent).toFixed(0)} / ${Number(limit).toFixed(0)} ₽</span>
+                            <div class="finance-limit-bar"><div class="finance-limit-fill ${over ? 'over' : ''}" style="width:${pct}%"></div></div>
+                        </div>
+                        <div class="finance-limit-actions">
+                            <button type="button" class="btn-icon" onclick="Finance.openEditLimit(${l.id})" title="Изменить">✏️</button>
+                            <button type="button" class="btn-icon btn-danger" onclick="Finance.deleteLimit(${l.id})" title="Удалить">🗑</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        if (formWrap) formWrap.style.display = 'none';
+        listWrap.style.display = 'block';
+    },
+
+    showAddLimitForm() {
+        document.getElementById('limitId').value = '';
+        document.getElementById('limitCategory').value = '';
+        document.getElementById('limitAmount').value = '';
+        document.getElementById('financeLimitsForm').style.display = 'block';
+        document.getElementById('financeLimitsListWrap').style.display = 'none';
+    },
+
+    cancelLimitForm() {
+        const form = document.getElementById('financeLimitsForm');
+        const listWrap = document.getElementById('financeLimitsListWrap');
+        if (form) form.style.display = 'none';
+        if (listWrap) listWrap.style.display = 'block';
+    },
+
+    openEditLimit(id) {
+        const l = financeLimits.find(x => x.id === id);
+        if (!l) return;
+        document.getElementById('limitId').value = l.id;
+        document.getElementById('limitCategory').value = l.category || '';
+        document.getElementById('limitAmount').value = l.amount != null ? l.amount : '';
+        document.getElementById('financeLimitsForm').style.display = 'block';
+        document.getElementById('financeLimitsListWrap').style.display = 'none';
+    },
+
+    async saveLimit() {
+        const id = document.getElementById('limitId').value.trim();
+        const category = document.getElementById('limitCategory').value.trim();
+        const amount = parseFloat(document.getElementById('limitAmount').value);
+        if (!category) {
+            (tg?.showAlert || alert)('Введите категорию');
+            return;
+        }
+        if (!amount || amount <= 0) {
+            (tg?.showAlert || alert)('Введите сумму лимита');
+            return;
+        }
+        try {
+            if (id) {
+                await API.request('PATCH', `/api/finance/limits/${id}`, { category, amount });
+            } else {
+                await API.request('POST', '/api/finance/limits', { category, amount });
+            }
+            await this.loadLimits();
+            this.renderLimitsList();
+            this.cancelLimitForm();
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        } catch (e) {
+            console.error('Finance limit save error:', e);
+            (tg?.showAlert || alert)(e.message || 'Ошибка сохранения лимита');
+        }
+    },
+
+    async deleteLimit(id) {
+        const doDelete = async () => {
+            try {
+                await API.request('DELETE', `/api/finance/limits/${id}`);
+                await this.loadLimits();
+                this.renderLimitsList();
+                if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+            } catch (e) {
+                console.error('Finance limit delete error:', e);
+                (tg?.showAlert || alert)(e.message || 'Ошибка удаления');
+            }
+        };
+        if (tg?.showConfirm) tg.showConfirm('Удалить лимит?', ok => { if (ok) doDelete(); });
+        else if (confirm('Удалить лимит?')) doDelete();
     }
 };

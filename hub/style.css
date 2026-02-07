@@ -1412,11 +1412,16 @@ body {
 
 .finance-actions {
     display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
     margin-bottom: 8px;
+}
+.finance-actions .btn-primary {
+    flex: 1;
+    min-width: 0;
 }
 .finance-actions .btn-primary,
 .finance-actions .btn-secondary {
-    width: 100%;
     padding: 10px 12px;
     border-radius: 12px;
     border: none;
@@ -1430,7 +1435,52 @@ body {
 .finance-actions .btn-secondary {
     background: var(--bg-secondary);
     color: var(--text);
+    flex: 0 0 auto;
 }
+
+/* Лимиты по категориям */
+.finance-limits-form .form-row { display: flex; gap: 12px; align-items: flex-end; }
+.finance-limits-form .form-group { flex: 1; }
+.finance-limits-form .form-actions-inline { display: flex; gap: 8px; margin-top: 12px; }
+.finance-add-limit-btn { margin-top: 12px; width: 100%; }
+.finance-limits-empty { color: var(--text-secondary); font-size: 14px; padding: 12px 0; text-align: center; }
+.finance-limit-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+.finance-limit-row:last-child { border-bottom: none; }
+.finance-limit-info { flex: 1; min-width: 0; }
+.finance-limit-cat { font-weight: 600; display: block; margin-bottom: 4px; }
+.finance-limit-amounts { font-size: 13px; color: var(--text-secondary); }
+.finance-limit-bar {
+    height: 6px;
+    background: var(--bg-secondary);
+    border-radius: 3px;
+    margin-top: 6px;
+    overflow: hidden;
+}
+.finance-limit-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.2s;
+}
+.finance-limit-fill.over { background: var(--danger); }
+.finance-limit-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.finance-limit-actions .btn-icon {
+    padding: 6px 10px;
+    border: none;
+    background: var(--bg-secondary);
+    color: var(--text);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+}
+.finance-limit-actions .btn-icon.btn-danger { background: rgba(255, 69, 58, 0.2); color: var(--danger); }
 
 .linked-person-view {
     transition: transform 0.2s ease, background 0.2s ease;
