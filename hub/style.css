@@ -1261,19 +1261,6 @@ body {
     cursor: pointer;
 }
 
-.finance-carryover {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    padding: 6px 0;
-}
-.finance-carryover .finance-total {
-    color: var(--text);
-    font-weight: 600;
-}
 .finance-summary-text {
     margin-bottom: 12px;
     font-size: 13px;

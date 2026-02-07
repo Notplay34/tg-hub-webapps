@@ -1597,8 +1597,6 @@ const Finance = {
         const income = Number(financeSummary.income) || 0;
         const expense = Number(financeSummary.expense) || 0;
         const balance = Number(financeSummary.balance) ?? (income - expense);
-        const previousBalance = Number(financeSummary.previous_balance) || 0;
-        const totalWithCarryover = previousBalance + balance;
         const goals = Array.isArray(financeGoals) ? financeGoals : [];
         const txs = Array.isArray(financeTransactions) ? financeTransactions : [];
         const monthLabel = this.formatMonthLabel(this.currentMonth);
@@ -1671,10 +1669,6 @@ const Finance = {
                         <div class="label">Баланс</div>
                         <div class="value">${balance.toFixed(0)}</div>
                     </div>
-                </div>
-                <div class="finance-carryover">
-                    <span class="finance-initial">Начальный остаток: ${previousBalance.toFixed(0)}</span>
-                    <span class="finance-total">Итого: ${totalWithCarryover.toFixed(0)}</span>
                 </div>
                 <div class="finance-summary-text">${summaryText}</div>
 
