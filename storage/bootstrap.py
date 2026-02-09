@@ -1,8 +1,8 @@
 """
 Инициализация доступа к БД для бота.
 
-DatabaseProvider создаётся при старте приложения; репозитории получают его
-и инкапсулируют всю работу с БД. Handlers и bot.py не создают соединений.
+ARCH: только фабрики (get_database_provider, get_tasks_repo). Никакой
+бизнес-логики и SQL. Handlers и bot.py не создают соединений.
 """
 
 from pathlib import Path

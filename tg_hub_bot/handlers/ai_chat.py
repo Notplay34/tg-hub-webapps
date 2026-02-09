@@ -1,3 +1,6 @@
+"""
+Хендлер текстовых сообщений → ИИ. ARCH: только вызов ai_service и ответ пользователю.
+"""
 from __future__ import annotations
 
 from aiogram import F, Dispatcher

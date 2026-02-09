@@ -1,7 +1,9 @@
 """
 TG Hub — Telegram бот YouHub. Точка входа: только запуск и wiring.
 
-Вся бизнес-логика: tg_hub_bot (handlers, services), storage, services.
+ARCH: Здесь ТОЛЬКО создание Bot/Dispatcher, вызов фабрик сервисов,
+регистрация handlers, scheduler_service.start(), polling.
+Запрещено: бизнес-логика, SQL, детали APScheduler/БД, условия по домену.
 """
 
 import asyncio

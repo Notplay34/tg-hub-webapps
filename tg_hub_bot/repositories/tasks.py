@@ -1,3 +1,7 @@
+"""
+Репозиторий задач для напоминаний. ARCH: весь SQL по задачам — только здесь.
+Handlers и services не пишут SQL; используют TaskRepository.
+"""
 from __future__ import annotations
 
 from datetime import date

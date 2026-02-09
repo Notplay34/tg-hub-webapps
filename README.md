@@ -48,10 +48,15 @@ python bot.py
 
 ## Структура
 
+Подробно: **ARCHITECTURE.md** (слои бота, API, куда что писать).
+
 ```
 tg_hub/
-├── bot.py              # Бот
+├── bot.py              # Точка входа бота (только wiring)
 ├── config.py           # Конфигурация
+├── storage/            # Провайдер БД, фабрики репозиториев
+├── services/           # Фабрики AI, scheduler (корень)
+├── tg_hub_bot/         # handlers, services, repositories, scheduler
 ├── webapp/             # Web App — Список дел
 │   ├── index.html
 │   ├── style.css
