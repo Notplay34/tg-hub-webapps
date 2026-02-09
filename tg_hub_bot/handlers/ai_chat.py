@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from aiogram import F, Dispatcher
 from aiogram.enums import ParseMode
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message
 
 from tg_hub_bot.services.ai import AiService
 
@@ -25,7 +25,7 @@ async def _handle_chat_with_ai(message: Message, ai_service: AiService) -> None:
     if not user_id:
         return
 
-    await message.answer("🧠 Думаю...", reply_markup=ReplyKeyboardRemove())
+    await message.answer("🧠 Думаю...")
     answer = await ai_service.generate_response(user_id, text)
     await message.answer(answer, parse_mode=ParseMode.HTML)
 

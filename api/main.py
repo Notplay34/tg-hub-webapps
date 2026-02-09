@@ -16,6 +16,7 @@ load_dotenv()
 
 # Память чата
 CHAT_HISTORY_LIMIT = 80          # сколько последних сообщений держим "сырыми"
+CHAT_CONTEXT_MESSAGES = 24      # сколько последних сообщений отправляем в ИИ (меньше = быстрее, без старых фактов)
 CHAT_SUMMARY_CHUNK = 40         # сколько старых сообщений сжимаем за один раз
 CHAT_SUMMARY_THRESHOLD = 200    # с какого общего количества начинаем сжатие
 
@@ -96,6 +97,113 @@ async def extract_person_with_ai(text: str):
         return result
     except (json.JSONDecodeError, AiNotConfiguredError, Exception) as e:
         logger.warning("extract_person_with_ai failed: %s", e)
+        return None
+
+
+async def extract_command_with_ai(message: str):
+    """
+    Понимает намерение по сырому тексту и возвращает команду для execute_ai_action,
+    либо None (вопрос, болтовня, неясно). Используется когда parse_user_command не сработал.
+    """
+    import re as _re
+    prompt = """Определи намерение пользователя по сообщению. Варианты:
+- task — добавить задачу (нужны: title; опционально deadline в YYYY-MM-DD)
+- expense — учёт расхода (нужны: amount — число; опционально category)
+- income — учёт дохода (нужны: amount; опционально category)
+- goal — финансовая цель (нужны: title, target_amount — число)
+- contact — добавить контакта/карточку человека (нужны: fio; опционально relation, birth_date YYYY-MM-DD)
+- note — заметка в базу знаний (нужны: content)
+
+Суммы всегда числами: 200000 для "200 тысяч", 500 для "500 руб".
+Если это вопрос, приветствие, непонятно или не подходит ни один тип — верни intent: "none".
+
+Ответь ОДНОЙ строкой JSON без markdown. Примеры:
+"хочу накопить на отпуск 200 тысяч" -> {"intent":"goal","title":"отпуск","target_amount":200000}
+"потратил 500 на обед" -> {"intent":"expense","amount":500,"category":"еда"}
+"напомни завтра позвонить маме" -> {"intent":"task","title":"позвонить маме","deadline":"завтра"}
+"просто спросил" -> {"intent":"none"}
+
+Сообщение пользователя:
+"""
+    try:
+        response = await ai_chat(
+            [{"role": "user", "content": prompt + message.strip()[:500]}],
+            model_hint="chat",
+            max_tokens=250,
+            temperature=0.1,
+        )
+        raw = response.strip()
+        if raw.startswith("```"):
+            raw = _re.sub(r"^```\w*\n?", "", raw)
+            raw = _re.sub(r"\n?```\s*$", "", raw)
+        data = json.loads(raw)
+        intent = (data.get("intent") or "none").strip().lower()
+        if intent == "none":
+            return None
+
+        today = datetime.now().date().isoformat()
+
+        if intent == "task":
+            title = (data.get("title") or "").strip()
+            if not title:
+                return None
+            deadline = (data.get("deadline") or "").strip()
+            if deadline and not _re.match(r"\d{4}-\d{2}-\d{2}", deadline):
+                deadline = parse_relative_date(deadline) or None
+            return {"action": "create_task", "title": title, "deadline": deadline or None, "description": ""}
+
+        if intent == "expense":
+            try:
+                amount = float(data.get("amount", 0))
+            except (TypeError, ValueError):
+                return None
+            if amount <= 0:
+                return None
+            category = (data.get("category") or "Разное").strip()[:100]
+            return {"action": "add_finance_transaction", "type": "expense", "amount": amount, "category": category, "date": today}
+
+        if intent == "income":
+            try:
+                amount = float(data.get("amount", 0))
+            except (TypeError, ValueError):
+                return None
+            if amount <= 0:
+                return None
+            category = (data.get("category") or "Доход").strip()[:100]
+            return {"action": "add_finance_transaction", "type": "income", "amount": amount, "category": category, "date": today}
+
+        if intent == "goal":
+            title = (data.get("title") or "").strip()[:200]
+            if not title:
+                return None
+            try:
+                target = float(data.get("target_amount", 0))
+            except (TypeError, ValueError):
+                return None
+            if target <= 0:
+                return None
+            return {"action": "add_finance_goal", "title": title, "target_amount": target}
+
+        if intent == "contact":
+            fio = (data.get("fio") or "").strip().title()
+            if not fio:
+                return None
+            out = {"action": "create_person", "fio": fio}
+            for key in ("relation", "birth_date", "strengths", "weaknesses"):
+                if data.get(key):
+                    out[key] = data[key] if isinstance(data[key], str) else str(data[key])
+            return out
+
+        if intent == "note":
+            content = (data.get("content") or "").strip()[:500]
+            if not content:
+                return None
+            title = content[:150] + ("..." if len(content) > 150 else "")
+            return {"action": "create_knowledge", "title": title, "content": content}
+
+        return None
+    except (json.JSONDecodeError, AiNotConfiguredError, Exception) as e:
+        logger.warning("extract_command_with_ai failed: %s", e)
         return None
 
 
@@ -1938,14 +2046,18 @@ async def maybe_summarize_chat(user_id: str):
 @app.post("/api/chat")
 async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     """Чат с ИИ-ассистентом, который знает все данные пользователя."""
-    
+    # Единый формат user_id для БД (избегаем расхождений Telegram id как число/строка)
+    uid = str(x_user_id).strip() if x_user_id else ""
+    if not uid:
+        return {"response": "Не указан пользователь (X-User-Id).", "action_executed": False}
+
     text_raw = msg.message.strip()
     text_lower = text_raw.lower()
 
     # --- Управление памятью диалога через команды ---
     # Новый диалог / очистка истории
     if text_lower in ("новый диалог", "очистить диалог", "очисти диалог", "reset", "start over"):
-        await chat_repo.clear_history(x_user_id, db_path=DATABASE)
+        await chat_repo.clear_history(uid, db_path=DATABASE)
         return {
             "response": "Я очистил нашу историю. Можем начать заново с чистого листа.",
             "action_executed": False,
@@ -1956,7 +2068,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     if forget_match:
         phrase = forget_match.group(1).strip()
         await chat_repo.delete_assistant_messages_with_phrase(
-            x_user_id,
+            uid,
             phrase,
             db_path=DATABASE,
         )
@@ -1966,13 +2078,20 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         }
 
     # Перед обычной обработкой — при необходимости сжимаем очень старую историю в резюме
-    await maybe_summarize_chat(x_user_id)
+    await maybe_summarize_chat(uid)
 
-    # Сначала проверяем прямые команды (без ИИ)
-    direct_command = parse_user_command(text_raw, x_user_id)
+    # Сначала проверяем прямые команды: regex, затем (если пусто) — понимание по сырому тексту через ИИ
+    direct_command = parse_user_command(text_raw, uid)
+    if not direct_command and is_ai_configured():
+        try:
+            direct_command = await extract_command_with_ai(text_raw)
+            if direct_command:
+                logger.info("extract_command_with_ai resolved: %s", direct_command.get("action"))
+        except Exception as e:
+            logger.warning("extract_command_with_ai error: %s", e)
     if direct_command:
-        # Для «добавь контакт» пробуем извлечь поля через ИИ — так корректно разбираются любые формулировки
-        if direct_command.get("action") == "create_person" and is_ai_configured():
+        # Для «добавь контакт» от regex пробуем обогатить поля через ИИ; если команда уже от extract_command_with_ai — не дублируем
+        if direct_command.get("action") == "create_person" and is_ai_configured() and not direct_command.get("relation") and not direct_command.get("birth_date"):
             try:
                 ai_person = await extract_person_with_ai(text_raw)
                 if ai_person and ai_person.get("fio"):
@@ -1983,7 +2102,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
                     logger.info("create_person: using AI extraction %s", direct_command)
             except Exception as e:
                 logger.warning("AI person extraction failed, using regex: %s", e)
-        result = await execute_ai_action(direct_command, x_user_id)
+        result = await execute_ai_action(direct_command, uid)
         logger.info(f"Direct command executed: {direct_command['action']} -> {result}")
         
         # Решаем, считать ли это реальным действием (меняющим данные)
@@ -1992,7 +2111,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         
         # Сохраняем в историю
         await chat_repo.append_messages(
-            x_user_id,
+            uid,
             [
                 ("user", msg.message),
                 ("assistant", result),
@@ -2002,21 +2121,75 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         
         return {"response": result, "action_executed": is_real_action}
     
+    today = datetime.now().date()
+    today_iso = today.isoformat()
+    # Запрос «что сегодня» — только задачи из БД; «итоги по деньгам» — только финансы из БД (без подмешивания истории)
+    is_today_tasks_query = any(
+        phrase in text_lower for phrase in (
+            "что сегодня", "что у меня сегодня", "какие задачи на сегодня",
+            "📋 что сегодня", "задачи на сегодня",
+        )
+    )
+    is_money_summary_query = any(
+        phrase in text_lower for phrase in (
+            "итоги по деньгам", "💰 итоги по деньгам", "итоги по финансам",
+            "сколько потратил", "какой баланс", "доход расход",
+        )
+    )
+
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
         
-        # Задачи (только активные для краткости)
+        # Задачи: только не выполненные (done=0), делим на «на сегодня» и «просроченные»
         cursor = await db.execute(
-            "SELECT id, title, description, deadline, priority, done FROM tasks WHERE user_id = ?",
-            (x_user_id,)
+            "SELECT id, title, description, deadline, priority, done FROM tasks WHERE user_id = ? AND done = 0 ORDER BY deadline ASC",
+            (uid,)
         )
-        tasks = [dict(r) for r in await cursor.fetchall()]
-        active_tasks = [t for t in tasks if not t["done"]]
+        active_tasks = [dict(r) for r in await cursor.fetchall()]
+        tasks_today = [t for t in active_tasks if t.get("deadline") == today_iso]
+        tasks_overdue = [dict(t, **{"_overdue": True}) for t in active_tasks if t.get("deadline") and t["deadline"] < today_iso]
+        # Для промпта убираем служебный флаг, оставляем только нужные поля
+        _strip = lambda lst: [{"title": x.get("title"), "deadline": x.get("deadline"), "priority": x.get("priority")} for x in lst]
+        tasks_today_short = _strip(tasks_today)
+        tasks_overdue_short = _strip(tasks_overdue)
+        logger.info("Chat context user_id=%s tasks_today=%d tasks_overdue=%d", uid, len(tasks_today), len(tasks_overdue))
+        
+        if is_today_tasks_query:
+            # Только задачи из БД. Историю НЕ передаём — иначе модель тянет старые «Нива»/цели из прошлых ответов
+            now = datetime.now()
+            today_str = now.strftime("%d.%m.%Y")
+            weekday = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"][now.weekday()]
+            system_prompt_today = f"""Ты помощник YouHub. Пользователь спрашивает, что у него сегодня.
+
+Данные из базы (только актуальные на момент запроса):
+• Задачи на сегодня (дедлайн {today_str}): {json.dumps(tasks_today_short, ensure_ascii=False) if tasks_today_short else "нет"}
+• Просроченные задачи (дедлайн уже прошёл — обязательно отметь их как «просрочено»): {json.dumps(tasks_overdue_short, ensure_ascii=False) if tasks_overdue_short else "нет"}
+
+Ответь кратко ТОЛЬКО по этим данным из базы. Не используй задачи или цифры из истории диалога. Если в блоке «нет» — так и скажи. Если задач на сегодня и просроченных нет — напиши «Задач на сегодня и просроченных нет» и подскажи: «Можно добавить задачу в Hub (кнопка «Открыть Hub») или написать: создай задачу …»"""
+            if uid == "anonymous":
+                system_prompt_today += "\n\nПользователь не авторизован через Telegram (anonymous). Добавь одну фразу: «Чтобы видеть свои задачи здесь, откройте Hub из приложения Telegram (кнопка «Открыть Hub» в этом чате).»"
+            elif not tasks_today_short and not tasks_overdue_short:
+                system_prompt_today += "\n\nВ базе для этого аккаунта сейчас 0 задач на сегодня и 0 просроченных. Если пользователь ожидал увидеть задачи — добавь: «Если вы создавали задачи в Hub, откройте Hub по кнопке «Открыть Hub» в этом чате — тогда данные будут в одном аккаунте.»"
+            if not is_ai_configured():
+                return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
+            try:
+                messages = [{"role": "system", "content": system_prompt_today}, {"role": "user", "content": msg.message}]
+                ai_response = await ai_chat(messages, model_hint="chat", max_tokens=350, temperature=0.3)
+                await chat_repo.append_turn_and_trim(uid, msg.message, ai_response, CHAT_HISTORY_LIMIT, db_path=DATABASE)
+                return {"response": ai_response, "action_executed": False}
+            except AiNotConfiguredError:
+                return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
+            except Exception as e:
+                logger.exception("AI chat (today) failed: %s", e)
+                return {"response": "Не удалось сформировать ответ. Попробуйте ещё раз."}
+        
+        # Полный контекст: задачи (на сегодня + просроченные), контакты, знания, финансы
+        total_tasks = len(active_tasks)
         
         # Люди
         cursor = await db.execute(
             "SELECT fio, data FROM people WHERE user_id = ?",
-            (x_user_id,)
+            (uid,)
         )
         people = []
         for row in await cursor.fetchall():
@@ -2027,7 +2200,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         # Знания
         cursor = await db.execute(
             "SELECT title, content, tags FROM knowledge WHERE user_id = ?",
-            (x_user_id,)
+            (uid,)
         )
         knowledge = []
         for row in await cursor.fetchall():
@@ -2036,7 +2209,6 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             knowledge.append(k)
 
         # Финансы: сводка за текущий месяц + последние операции и цели
-        today = datetime.now().date()
         start_month = today.replace(day=1)
         if start_month.month == 12:
             end_month = start_month.replace(year=start_month.year + 1, month=1)
@@ -2052,7 +2224,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             FROM finance_transactions
             WHERE user_id = ? AND date >= ? AND date < ?
             """,
-            (x_user_id, start_month.isoformat(), end_month.isoformat()),
+            (uid, start_month.isoformat(), end_month.isoformat()),
         )
         fin_row = await cursor.fetchone()
         fin_income = (fin_row["income"] or 0) if fin_row else 0
@@ -2068,14 +2240,14 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             ORDER BY date DESC, id DESC
             LIMIT 20
             """,
-            (x_user_id,),
+            (uid,),
         )
         fin_last_ops = [dict(row) for row in await cursor.fetchall()]
 
         # Цели
         cursor = await db.execute(
             "SELECT title, target_amount, current_amount, target_date, priority FROM finance_goals WHERE user_id = ? ORDER BY priority ASC, created_at DESC",
-            (x_user_id,),
+            (uid,),
         )
         fin_goals = [dict(row) for row in await cursor.fetchall()]
         
@@ -2087,21 +2259,58 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             WHERE user_id = ? AND date >= ? AND date < ? AND type = 'expense'
             GROUP BY category
             """,
-            (x_user_id, start_month.isoformat(), end_month.isoformat()),
+            (uid, start_month.isoformat(), end_month.isoformat()),
         )
         expenses_by_category = [dict(row) for row in await cursor.fetchall()]
         
         # Лимиты по категориям
         cursor = await db.execute(
             "SELECT category, amount FROM finance_limits WHERE user_id = ? ORDER BY category",
-            (x_user_id,),
+            (uid,),
         )
         fin_limits = [dict(row) for row in await cursor.fetchall()]
         
-        # Загружаем историю чата
+        # Запрос «Итоги по деньгам» — только финансы из БД, без подмешивания цифр из истории
+        if is_money_summary_query:
+            by_cat = {r["category"]: r["total"] for r in expenses_by_category}
+            limits_summary_money = [
+                {"category": lim["category"], "spent": by_cat.get(lim["category"], 0) or 0, "limit": lim["amount"], "over": (by_cat.get(lim["category"], 0) or 0) > lim["amount"]}
+                for lim in fin_limits
+            ]
+            now = datetime.now()
+            months_ru = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+            month_name = f"{months_ru[now.month - 1]} {now.year}"
+            system_prompt_money = f"""Ты помощник YouHub. Пользователь спрашивает итоги по деньгам.
+
+Данные из базы (только актуальные на момент запроса). Используй ТОЛЬКО эти цифры, не бери суммы из истории диалога:
+• За {month_name}: доход {fin_income} ₽, расход {fin_expense} ₽, баланс {fin_balance} ₽
+• Последние операции: {json.dumps(fin_last_ops, ensure_ascii=False) if fin_last_ops else "нет"}
+• Цели: {json.dumps(fin_goals, ensure_ascii=False) if fin_goals else "нет"}
+• Лимиты (потрачено / лимит): {json.dumps(limits_summary_money, ensure_ascii=False) if limits_summary_money else "нет"}
+
+Ответь кратко только по финансам. Если операций нет — так и скажи: «В базе нет операций за этот месяц», не придумывай доходы и расходы. Цифры только из этого блока."""
+            if uid == "anonymous":
+                system_prompt_money += "\n\nПользователь не авторизован (anonymous). Добавь: «Откройте Hub из приложения Telegram, чтобы видеть свои финансы.»"
+            elif fin_income == 0 and fin_expense == 0 and not fin_last_ops:
+                system_prompt_money += "\n\nВ базе для этого аккаунта нет операций. Если пользователь ожидал увидеть итоги — добавь: «Если вы вносили операции в Hub, откройте его по кнопке «Открыть Hub» в этом чате.»"
+            # Историю НЕ передаём — иначе модель повторяет старые суммы/цели (Нива, Багги и т.д.) из прошлых ответов
+            if not is_ai_configured():
+                return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
+            try:
+                messages = [{"role": "system", "content": system_prompt_money}, {"role": "user", "content": msg.message}]
+                ai_response = await ai_chat(messages, model_hint="chat", max_tokens=300, temperature=0.2)
+                await chat_repo.append_turn_and_trim(uid, msg.message, ai_response, CHAT_HISTORY_LIMIT, db_path=DATABASE)
+                return {"response": ai_response, "action_executed": False}
+            except AiNotConfiguredError:
+                return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
+            except Exception as e:
+                logger.exception("AI chat (money) failed: %s", e)
+                return {"response": "Не удалось сформировать ответ. Попробуйте ещё раз."}
+        
+        # Загружаем последние N сообщений для контекста (меньше = быстрее ответ и без устаревших фактов из истории)
         chat_history = await chat_repo.get_recent_history(
-            x_user_id,
-            CHAT_HISTORY_LIMIT,
+            uid,
+            CHAT_CONTEXT_MESSAGES,
             db_path=DATABASE,
         )
     
@@ -2130,7 +2339,8 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 ⏰ Сейчас: {today_str} ({weekday}), {now.strftime("%H:%M")}
 
 📊 Данные пользователя (используй только их, не выдумывай):
-• Задачи ({len(active_tasks)}): {json.dumps(active_tasks, ensure_ascii=False) if active_tasks else "нет"}
+⚠️ Актуальны ТОЛЬКО данные в этом блоке. В истории диалога могли упоминаться старые цели/задачи/операции — пользователь мог их удалить. Не пересказывай цели или факты из истории. Если в блоке написано «Цели: нет» — отвечай, что целей нет; не упоминай цели из прошлых сообщений.
+• Задачи из БД: на сегодня (дедлайн сегодня) — {json.dumps(tasks_today_short, ensure_ascii=False) if tasks_today_short else "нет"}; просроченные (дедлайн прошёл) — {json.dumps(tasks_overdue_short, ensure_ascii=False) if tasks_overdue_short else "нет"}. Всего активных (не выполненных): {total_tasks}. Готовые не показывай.
 • Контакты ({len(people)}): {json.dumps(people, ensure_ascii=False) if people else "нет"}
 • Знания ({len(knowledge)}): {json.dumps(knowledge, ensure_ascii=False) if knowledge else "нет"}
 • Финансы (текущий месяц): доход {fin_income}, расход {fin_expense}, баланс {fin_balance}
@@ -2161,7 +2371,8 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 - Пиши КРАТКО, по-русски. Без воды. Тон — человекоподобный, тёплый, как личный ассистент.
 - Опирайся только на данные выше и контекст диалога. Не придумывай факты.
 - Не говори "я создал задачу" — действия выполняет система по команде пользователя. Ты лишь подсказываешь команды или анализируешь данные.
-- Проактивность: если видишь в задачах встречу/созвон/звонок сегодня или скоро — предложи подготовиться или напомни, что стоит проверить. На вопросы вроде «что у меня сегодня?» — собери из задач и контекста один понятный ответ."""
+- Проактивность: если видишь в задачах встречу/созвон/звонок сегодня или скоро — предложи подготовиться или напомни, что стоит проверить. На вопросы вроде «что у меня сегодня?» — собери из задач и контекста один понятный ответ.
+- По финансам и задачам: используй только числа и списки из блока «Данные пользователя». Не повторяй суммы или задачи из истории диалога — они могли устареть."""
 
     if not is_ai_configured():
         return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
@@ -2180,7 +2391,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         
         # Сохраняем в историю
         await chat_repo.append_turn_and_trim(
-            x_user_id,
+            uid,
             msg.message,
             ai_response,
             CHAT_HISTORY_LIMIT,

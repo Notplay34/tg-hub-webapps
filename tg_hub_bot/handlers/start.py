@@ -1,5 +1,5 @@
 """
-Хендлер команды /start и клавиатура с кнопкой Web App.
+Хендлер команды /start и клавиатуры: inline (Web App) и reply (быстрые действия).
 
 ARCH: только регистрация команды и формат ответа (текст, клавиатура).
 Бизнес-логику не добавлять — в services.
@@ -12,10 +12,34 @@ from aiogram.filters import CommandStart
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
-    ReplyKeyboardRemove,
+    ReplyKeyboardMarkup,
     WebAppInfo,
 )
+
+
+def get_reply_keyboard(webapp_url: str | None) -> ReplyKeyboardMarkup:
+    """
+    Постоянная клавиатура под полем ввода: быстрые действия.
+    Нажатие отправляет текст боту — ИИ отвечает по контексту (задачи, финансы и т.д.).
+    """
+    row1 = [
+        KeyboardButton(text="📋 Что сегодня?"),
+        KeyboardButton(text="💰 Итоги по деньгам"),
+    ]
+    row2 = [
+        KeyboardButton(text="🎯 Мои цели"),
+        KeyboardButton(text="🤖 Задать вопрос"),
+    ]
+    keyboard = [row1, row2]
+    if webapp_url:
+        keyboard.append([KeyboardButton(text="🌐 Открыть Hub", web_app=WebAppInfo(url=webapp_url))])
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        input_field_placeholder="Напиши задачу, расход или вопрос...",
+    )
 
 
 def get_main_keyboard(webapp_url: str | None) -> InlineKeyboardMarkup | None:
@@ -24,7 +48,7 @@ def get_main_keyboard(webapp_url: str | None) -> InlineKeyboardMarkup | None:
         return None
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Старт", web_app=WebAppInfo(url=webapp_url))]
+            [InlineKeyboardButton(text="▶️ Открыть Hub", web_app=WebAppInfo(url=webapp_url))]
         ]
     )
 
@@ -34,16 +58,16 @@ def register_start_handler(dp: Dispatcher, webapp_url: str | None = None) -> Non
 
     @dp.message(CommandStart())
     async def cmd_start(message: Message) -> None:
-        await message.answer("🧠 YouHub", reply_markup=ReplyKeyboardRemove())
+        # Сначала показываем постоянную клавиатуру (останется под полем ввода)
+        await message.answer(
+            "👋 <b>YouHub</b> — твой личный хаб: задачи, люди, деньги и ИИ в одном месте.",
+            reply_markup=get_reply_keyboard(webapp_url),
+        )
         text = (
-            "👋 <b>YouHub</b> — личный хаб: задачи, люди, деньги и ИИ в одном боте.\n\n"
-            "Что внутри:\n\n"
-            "📋 <b>Задачи</b> — дедлайны, приоритеты, напоминания\n"
-            "👤 <b>Люди</b> — досье, связи, заметки\n"
-            "📚 <b>База знаний</b> — важное под рукой\n"
-            "💰 <b>Финансы</b> — доходы, расходы, цели и лимиты\n"
-            "🤖 <b>ИИ-ассистент</b> — можешь просто написать боту вопрос, он ответит по твоим данным.\n\n"
-            "Нажми <b>Старт</b> — и за 30 секунд настроишь всё под себя."
+            "Можешь <b>нажать кнопку ниже</b> — бот ответит по твоим данным. "
+            "Или написать своим словами: «добавь задачу купить молоко», «потратил 500 на обед», «что у меня сегодня?»\n\n"
+            "📋 Задачи · 👤 Люди · 📚 База знаний · 💰 Финансы · 🤖 ИИ-ассистент\n\n"
+            "Полный интерфейс — по кнопке <b>Открыть Hub</b>."
         )
         if not webapp_url:
             text += "\n\n<i>⚠️ WEBAPP_HUB_URL не настроен</i>"
