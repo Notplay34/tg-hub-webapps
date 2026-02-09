@@ -2136,6 +2136,11 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             "сколько потратил", "какой баланс", "доход расход",
         )
     )
+    is_goals_query = any(
+        phrase in text_lower for phrase in (
+            "мои цели", "🎯 мои цели", "какие цели", "финансовые цели", "покажи цели",
+        )
+    )
 
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
@@ -2155,33 +2160,34 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         logger.info("Chat context user_id=%s tasks_today=%d tasks_overdue=%d", uid, len(tasks_today), len(tasks_overdue))
         
         if is_today_tasks_query:
-            # Только задачи из БД. Историю НЕ передаём — иначе модель тянет старые «Нива»/цели из прошлых ответов
+            # Ответ только из БД, без ИИ — единый красивый формат
             now = datetime.now()
             today_str = now.strftime("%d.%m.%Y")
             weekday = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"][now.weekday()]
-            system_prompt_today = f"""Ты помощник YouHub. Пользователь спрашивает, что у него сегодня.
-
-Данные из базы (только актуальные на момент запроса):
-• Задачи на сегодня (дедлайн {today_str}): {json.dumps(tasks_today_short, ensure_ascii=False) if tasks_today_short else "нет"}
-• Просроченные задачи (дедлайн уже прошёл — обязательно отметь их как «просрочено»): {json.dumps(tasks_overdue_short, ensure_ascii=False) if tasks_overdue_short else "нет"}
-
-Ответь кратко ТОЛЬКО по этим данным из базы. Не используй задачи или цифры из истории диалога. Если в блоке «нет» — так и скажи. Если задач на сегодня и просроченных нет — напиши «Задач на сегодня и просроченных нет» и подскажи: «Можно добавить задачу в Hub (кнопка «Открыть Hub») или написать: создай задачу …»"""
+            lines = [f"📅 <b>Сегодня, {weekday}, {today_str}</b>", ""]
+            lines.append("📋 <b>На сегодня:</b>")
+            if tasks_today_short:
+                for t in tasks_today_short:
+                    lines.append(f"• {t.get('title', '—')}")
+            else:
+                lines.append("• Задач нет")
+            lines.append("")
+            lines.append("⚠️ <b>Просроченные:</b>")
+            if tasks_overdue_short:
+                for t in tasks_overdue_short:
+                    lines.append(f"• {t.get('title', '—')} (дедлайн прошёл)")
+            else:
+                lines.append("• Нет")
+            lines.append("")
             if uid == "anonymous":
-                system_prompt_today += "\n\nПользователь не авторизован через Telegram (anonymous). Добавь одну фразу: «Чтобы видеть свои задачи здесь, откройте Hub из приложения Telegram (кнопка «Открыть Hub» в этом чате).»"
+                lines.append("💡 Откройте Hub из приложения Telegram (кнопка «Открыть Hub»), чтобы видеть свои задачи.")
             elif not tasks_today_short and not tasks_overdue_short:
-                system_prompt_today += "\n\nВ базе для этого аккаунта сейчас 0 задач на сегодня и 0 просроченных. Если пользователь ожидал увидеть задачи — добавь: «Если вы создавали задачи в Hub, откройте Hub по кнопке «Открыть Hub» в этом чате — тогда данные будут в одном аккаунте.»"
-            if not is_ai_configured():
-                return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
-            try:
-                messages = [{"role": "system", "content": system_prompt_today}, {"role": "user", "content": msg.message}]
-                ai_response = await ai_chat(messages, model_hint="chat", max_tokens=350, temperature=0.3)
-                await chat_repo.append_turn_and_trim(uid, msg.message, ai_response, CHAT_HISTORY_LIMIT, db_path=DATABASE)
-                return {"response": ai_response, "action_executed": False}
-            except AiNotConfiguredError:
-                return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
-            except Exception as e:
-                logger.exception("AI chat (today) failed: %s", e)
-                return {"response": "Не удалось сформировать ответ. Попробуйте ещё раз."}
+                lines.append("💡 Можно добавить задачу в Hub или написать: <i>создай задачу …</i>")
+            else:
+                lines.append("💡 Управлять задачами: Hub или команда <i>создай задачу …</i>")
+            response_today = "\n".join(lines)
+            await chat_repo.append_turn_and_trim(uid, msg.message, response_today, CHAT_HISTORY_LIMIT, db_path=DATABASE)
+            return {"response": response_today, "action_executed": False}
         
         # Полный контекст: задачи (на сегодня + просроченные), контакты, знания, финансы
         total_tasks = len(active_tasks)
@@ -2270,42 +2276,54 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         )
         fin_limits = [dict(row) for row in await cursor.fetchall()]
         
-        # Запрос «Итоги по деньгам» — только финансы из БД, без подмешивания цифр из истории
+        # Запрос «Итоги по деньгам» — ответ только из БД, без ИИ
         if is_money_summary_query:
-            by_cat = {r["category"]: r["total"] for r in expenses_by_category}
-            limits_summary_money = [
-                {"category": lim["category"], "spent": by_cat.get(lim["category"], 0) or 0, "limit": lim["amount"], "over": (by_cat.get(lim["category"], 0) or 0) > lim["amount"]}
-                for lim in fin_limits
-            ]
             now = datetime.now()
             months_ru = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
             month_name = f"{months_ru[now.month - 1]} {now.year}"
-            system_prompt_money = f"""Ты помощник YouHub. Пользователь спрашивает итоги по деньгам.
-
-Данные из базы (только актуальные на момент запроса). Используй ТОЛЬКО эти цифры, не бери суммы из истории диалога:
-• За {month_name}: доход {fin_income} ₽, расход {fin_expense} ₽, баланс {fin_balance} ₽
-• Последние операции: {json.dumps(fin_last_ops, ensure_ascii=False) if fin_last_ops else "нет"}
-• Цели: {json.dumps(fin_goals, ensure_ascii=False) if fin_goals else "нет"}
-• Лимиты (потрачено / лимит): {json.dumps(limits_summary_money, ensure_ascii=False) if limits_summary_money else "нет"}
-
-Ответь кратко только по финансам. Если операций нет — так и скажи: «В базе нет операций за этот месяц», не придумывай доходы и расходы. Цифры только из этого блока."""
+            lines = [f"💰 <b>Итоги за {month_name}</b>", ""]
+            lines.append(f"• Доход: {fin_income:,.0f} ₽".replace(",", " "))
+            lines.append(f"• Расход: {fin_expense:,.0f} ₽".replace(",", " "))
+            lines.append(f"• Баланс: {fin_balance:,.0f} ₽".replace(",", " "))
+            lines.append("")
+            if fin_last_ops:
+                lines.append("<b>Последние операции:</b>")
+                for op in fin_last_ops[:5]:
+                    sign = "+" if op.get("type") == "income" else "−"
+                    lines.append(f"  {sign} {op.get('amount', 0):,.0f} ₽ — {op.get('category', '')} ({op.get('date', '')})".replace(",", " "))
+            else:
+                lines.append("Операций за месяц нет.")
             if uid == "anonymous":
-                system_prompt_money += "\n\nПользователь не авторизован (anonymous). Добавь: «Откройте Hub из приложения Telegram, чтобы видеть свои финансы.»"
+                lines.append("")
+                lines.append("💡 Откройте Hub из приложения Telegram, чтобы видеть свои финансы.")
             elif fin_income == 0 and fin_expense == 0 and not fin_last_ops:
-                system_prompt_money += "\n\nВ базе для этого аккаунта нет операций. Если пользователь ожидал увидеть итоги — добавь: «Если вы вносили операции в Hub, откройте его по кнопке «Открыть Hub» в этом чате.»"
-            # Историю НЕ передаём — иначе модель повторяет старые суммы/цели (Нива, Багги и т.д.) из прошлых ответов
-            if not is_ai_configured():
-                return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
-            try:
-                messages = [{"role": "system", "content": system_prompt_money}, {"role": "user", "content": msg.message}]
-                ai_response = await ai_chat(messages, model_hint="chat", max_tokens=300, temperature=0.2)
-                await chat_repo.append_turn_and_trim(uid, msg.message, ai_response, CHAT_HISTORY_LIMIT, db_path=DATABASE)
-                return {"response": ai_response, "action_executed": False}
-            except AiNotConfiguredError:
-                return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
-            except Exception as e:
-                logger.exception("AI chat (money) failed: %s", e)
-                return {"response": "Не удалось сформировать ответ. Попробуйте ещё раз."}
+                lines.append("")
+                lines.append("💡 Если вносили операции в Hub — откройте его по кнопке «Открыть Hub» в этом чате.")
+            response_money = "\n".join(lines)
+            await chat_repo.append_turn_and_trim(uid, msg.message, response_money, CHAT_HISTORY_LIMIT, db_path=DATABASE)
+            return {"response": response_money, "action_executed": False}
+        
+        # Запрос «Мои цели» — ответ только из БД, без ИИ (никаких Нива/Багги из истории)
+        if is_goals_query:
+            lines = ["🎯 <b>Финансовые цели</b>", ""]
+            if fin_goals:
+                for i, g in enumerate(fin_goals, 1):
+                    title = g.get("title") or "—"
+                    target = g.get("target_amount") or 0
+                    current = g.get("current_amount") or 0
+                    lines.append(f"{i}. <b>{title}</b> — {target:,.0f} ₽".replace(",", " "))
+                    lines.append(f"   Накоплено: {current:,.0f} ₽".replace(",", " "))
+                    lines.append("")
+            else:
+                lines.append("Целей пока нет.")
+                lines.append("")
+                lines.append("💡 Добавить: Hub → Финансы → Цели или напиши: <i>добавь цель название сумма</i>")
+            if uid == "anonymous":
+                lines.append("")
+                lines.append("💡 Откройте Hub из приложения Telegram, чтобы видеть свои цели.")
+            response_goals = "\n".join(lines).strip()
+            await chat_repo.append_turn_and_trim(uid, msg.message, response_goals, CHAT_HISTORY_LIMIT, db_path=DATABASE)
+            return {"response": response_goals, "action_executed": False}
         
         # Загружаем последние N сообщений для контекста (меньше = быстрее ответ и без устаревших фактов из истории)
         chat_history = await chat_repo.get_recent_history(
