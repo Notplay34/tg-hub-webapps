@@ -10,7 +10,6 @@ from typing import Optional, List
 import aiosqlite
 import json
 from pathlib import Path
-from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,34 +19,25 @@ CHAT_HISTORY_LIMIT = 80          # сколько последних сообщ�
 CHAT_SUMMARY_CHUNK = 40         # сколько старых сообщений сжимаем за один раз
 CHAT_SUMMARY_THRESHOLD = 200    # с какого общего количества начинаем сжатие
 
-# Поддержка разных провайдеров ИИ
-# Приоритет: OpenRouter > vsellm > Google > Yandex
-api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("VSELM_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("YANDEX_API_KEY")
-
-if os.getenv("OPENROUTER_API_KEY"):
-    base_url = "https://openrouter.ai/api/v1"
-elif os.getenv("VSELM_API_KEY"):
-    base_url = os.getenv("VSELM_BASE_URL", "https://api.vsellm.ru/v1")
-elif os.getenv("GOOGLE_API_KEY"):
-    base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-else:
-    base_url = None
-
-# Для OpenRouter нужны дополнительные заголовки
-default_headers = {}
-if os.getenv("OPENROUTER_API_KEY"):
-    default_headers = {
-        "HTTP-Referer": "https://tghub.duckdns.org",
-        "X-Title": "YouHub"
-    }
-
-
-openai_client = AsyncOpenAI(
-    api_key=api_key,
-    base_url=base_url,
-    timeout=120.0,  # Увеличен таймаут для бесплатных моделей
-    default_headers=default_headers if default_headers else None
-) if api_key and base_url else None
+"""
+Импортируем AI‑клиент и репозиторий истории чата.
+Используем try/except, чтобы код работал и при запуске как пакета (`api.main`),
+и при прямом запуске `python api/main.py`.
+"""
+try:
+    from api.services.ai_client import (
+        chat as ai_chat,
+        is_ai_configured,
+        AiNotConfiguredError,
+    )
+    from api.repositories import chat_history as chat_repo
+except ImportError:  # fallback для запуска из каталога api
+    from services.ai_client import (  # type: ignore[no-redef]
+        chat as ai_chat,
+        is_ai_configured,
+        AiNotConfiguredError,
+    )
+    from repositories import chat_history as chat_repo  # type: ignore[no-redef]
 
 app = FastAPI(title="TG Hub API")
 
@@ -340,7 +330,7 @@ async def health():
     return {
         "status": "ok",
         "db": "ok",
-        "ai_client": bool(openai_client),
+        "ai_client": is_ai_configured(),
     }
 
 
@@ -435,7 +425,7 @@ async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(..
         
         updates: list[str] = []
         values = []
-        data = task.dict(exclude_unset=True)
+        data = task.model_dump(exclude_unset=True)
         action_type = "updated"
         
         # Валидация: если меняем recurrence_type, но после обновления у задачи не будет дедлайна — ошибка
@@ -582,7 +572,7 @@ async def get_people(x_user_id: str = Header(...)):
 
 @app.post("/api/people")
 async def create_person(person: Person, x_user_id: str = Header(...)):
-    data = person.dict(exclude={'fio'})
+    data = person.model_dump(exclude={'fio'})
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
             "INSERT INTO people (user_id, fio, data) VALUES (?, ?, ?)",
@@ -596,7 +586,7 @@ async def create_person(person: Person, x_user_id: str = Header(...)):
 
 @app.patch("/api/people/{person_id}")
 async def update_person(person_id: int, person: Person, x_user_id: str = Header(...)):
-    data = person.dict(exclude={'fio'})
+    data = person.model_dump(exclude={'fio'})
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("SELECT id FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
         if not await cursor.fetchone():
@@ -1295,7 +1285,7 @@ def parse_user_command(message: str, user_id: str):
         try:
             d, m, y = birth_str.split('.')
             birth_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-        except:
+        except Exception:
             birth_date = None
         
         data = {}
@@ -1434,7 +1424,7 @@ def parse_user_command(message: str, user_id: str):
                 try:
                     d, m, y = birth_date.split('.')
                     birth_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-                except:
+                except Exception:
                     birth_date = None
                 fio = re.sub(r'\s*\d{1,2}\.\d{1,2}\.\d{4}\s*', ' ', fio).strip()
             
@@ -1631,7 +1621,7 @@ def parse_relative_date(text: str) -> str:
         year = int(date_match.group(3)) if date_match.group(3) else today.year
         try:
             return datetime(year, month, day).date().isoformat()
-        except:
+        except Exception:
             pass
     
     return None
@@ -1849,31 +1839,22 @@ async def maybe_summarize_chat(user_id: str):
     - сохраняем резюме как отдельное сообщение с ролью 'system';
     - исходные старые сообщения удаляем.
     """
-    if not openai_client:
+    if not is_ai_configured():
         return
-    try:
-        async with aiosqlite.connect(DATABASE) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT COUNT(*) as cnt FROM chat_history WHERE user_id = ?",
-                (user_id,),
-            )
-            row = await cursor.fetchone()
-            total = row["cnt"] if row else 0
-            if total < CHAT_SUMMARY_THRESHOLD:
-                return
 
-            # Берём самые старые сообщения
-            cursor = await db.execute(
-                """SELECT id, role, content FROM chat_history
-                   WHERE user_id = ?
-                   ORDER BY created_at ASC
-                   LIMIT ?""",
-                (user_id, CHAT_SUMMARY_CHUNK),
-            )
-            rows = await cursor.fetchall()
-            if not rows:
-                return
+    try:
+        total = await chat_repo.get_total_count(user_id, db_path=DATABASE)
+        if total < CHAT_SUMMARY_THRESHOLD:
+            return
+
+        # Берём самые старые сообщения
+        rows = await chat_repo.get_oldest_messages(
+            user_id,
+            CHAT_SUMMARY_CHUNK,
+            db_path=DATABASE,
+        )
+        if not rows:
+            return
 
         # Готовим запрос к ИИ для резюме
         history_messages = [
@@ -1889,38 +1870,27 @@ async def maybe_summarize_chat(user_id: str):
             ),
         }
 
-        model = os.getenv("AI_MODEL", "gpt-3.5-turbo")
-        if base_url and "openrouter.ai" in base_url:
-            model = os.getenv("AI_MODEL", "google/gemma-3-4b-it:free")
-        elif base_url and "vsellm.ru" in base_url:
-            model = os.getenv("AI_MODEL", "gpt-3.5-turbo")
-        elif base_url and "google" in base_url.lower():
-            model = os.getenv("AI_MODEL", "gemini-pro")
-
-        response = await openai_client.chat.completions.create(
-            model=model,
-            messages=[system_msg] + history_messages,
+        summary_text = await ai_chat(
+            [system_msg] + history_messages,
+            model_hint="summary",
             max_tokens=220,
             temperature=0.2,
         )
-        summary_text = response.choices[0].message.content.strip()
         if not summary_text:
             return
 
         # Сохраняем резюме и удаляем старые сообщения
-        ids_to_delete = [r["id"] for r in rows]
-        async with aiosqlite.connect(DATABASE) as db:
-            await db.execute(
-                "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-                (user_id, "system", summary_text),
-            )
-            placeholders = ",".join("?" for _ in ids_to_delete)
-            params = [user_id, *ids_to_delete]
-            await db.execute(
-                f"DELETE FROM chat_history WHERE user_id = ? AND id IN ({placeholders})",
-                params,
-            )
-            await db.commit()
+        ids_to_delete = [int(r["id"]) for r in rows]
+        await chat_repo.insert_system_message(
+            user_id,
+            summary_text,
+            db_path=DATABASE,
+        )
+        await chat_repo.delete_messages_by_ids(
+            user_id,
+            ids_to_delete,
+            db_path=DATABASE,
+        )
         logger.info(f"Chat history summarized for user {user_id}")
     except Exception as e:
         logger.error(f"Error summarizing chat for user {user_id}: {e}")
@@ -1936,9 +1906,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     # --- Управление памятью диалога через команды ---
     # Новый диалог / очистка истории
     if text_lower in ("новый диалог", "очистить диалог", "очисти диалог", "reset", "start over"):
-        async with aiosqlite.connect(DATABASE) as db:
-            await db.execute("DELETE FROM chat_history WHERE user_id = ?", (x_user_id,))
-            await db.commit()
+        await chat_repo.clear_history(x_user_id, db_path=DATABASE)
         return {
             "response": "Я очистил нашу историю. Можем начать заново с чистого листа.",
             "action_executed": False,
@@ -1948,30 +1916,11 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     forget_match = re.match(r"забудь про (.+)", text_lower)
     if forget_match:
         phrase = forget_match.group(1).strip()
-        async with aiosqlite.connect(DATABASE) as db:
-            like = f"%{phrase}%"
-            # Сначала находим кандидатов только среди ответов ассистента
-            cursor = await db.execute(
-                "SELECT id, content FROM chat_history WHERE user_id = ? AND role = 'assistant' AND LOWER(content) LIKE ?",
-                (x_user_id, like),
-            )
-            rows = await cursor.fetchall()
-            
-            # Дополнительная фильтрация в Python: ищем фразу как подстроку без жёсткого LIKE по всему
-            ids_to_delete = []
-            for row in rows:
-                content_lower = row[1].lower()
-                if phrase in content_lower:
-                    ids_to_delete.append(row[0])
-            
-            if ids_to_delete:
-                placeholders = ",".join("?" for _ in ids_to_delete)
-                params = [x_user_id, *ids_to_delete]
-                await db.execute(
-                    f"DELETE FROM chat_history WHERE user_id = ? AND id IN ({placeholders})",
-                    params,
-                )
-                await db.commit()
+        await chat_repo.delete_assistant_messages_with_phrase(
+            x_user_id,
+            phrase,
+            db_path=DATABASE,
+        )
         return {
             "response": f"Ок, постараюсь больше не учитывать информацию про «{phrase}».",
             "action_executed": False,
@@ -1991,16 +1940,14 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         is_real_action = action_type not in ("ask_split_tasks", "ask_task_confirmation")
         
         # Сохраняем в историю
-        async with aiosqlite.connect(DATABASE) as db:
-            await db.execute(
-                "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-                (x_user_id, "user", msg.message)
-            )
-            await db.execute(
-                "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-                (x_user_id, "assistant", result)
-            )
-            await db.commit()
+        await chat_repo.append_messages(
+            x_user_id,
+            [
+                ("user", msg.message),
+                ("assistant", result),
+            ],
+            db_path=DATABASE,
+        )
         
         return {"response": result, "action_executed": is_real_action}
     
@@ -2101,14 +2048,11 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         fin_limits = [dict(row) for row in await cursor.fetchall()]
         
         # Загружаем историю чата
-        cursor = await db.execute(
-            """SELECT role, content FROM chat_history 
-               WHERE user_id = ? 
-               ORDER BY created_at DESC LIMIT ?""",
-            (x_user_id, CHAT_HISTORY_LIMIT)
+        chat_history = await chat_repo.get_recent_history(
+            x_user_id,
+            CHAT_HISTORY_LIMIT,
+            db_path=DATABASE,
         )
-        history_rows = await cursor.fetchall()
-        chat_history = [{"role": row["role"], "content": row["content"]} for row in reversed(history_rows)]
     
     # Текущая дата и время
     now = datetime.now()
@@ -2168,51 +2112,34 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 - Опирайся только на данные выше и контекст диалога. Не придумывай факты.
 - Не говори "я создал задачу" — действия выполняет система по команде пользователя. Ты лишь подсказываешь команды или анализируешь данные."""
 
-    if not openai_client:
+    if not is_ai_configured():
         return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
     
     try:
-        model = os.getenv("AI_MODEL", "gpt-3.5-turbo")
-        if base_url and "openrouter.ai" in base_url:
-            model = os.getenv("AI_MODEL", "google/gemma-3-4b-it:free")
-        elif base_url and "vsellm.ru" in base_url:
-            model = os.getenv("AI_MODEL", "gpt-3.5-turbo")
-        elif base_url and "google" in base_url.lower():
-            model = os.getenv("AI_MODEL", "gemini-pro")
-        
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(chat_history)
         messages.append({"role": "user", "content": msg.message})
         
-        response = await openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
+        ai_response = await ai_chat(
+            messages,
+            model_hint="chat",
             max_tokens=400,
-            temperature=0.4
+            temperature=0.4,
         )
         
-        ai_response = response.choices[0].message.content.strip()
-        
         # Сохраняем в историю
-        async with aiosqlite.connect(DATABASE) as db:
-            await db.execute(
-                "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-                (x_user_id, "user", msg.message)
-            )
-            await db.execute(
-                "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-                (x_user_id, "assistant", ai_response)
-            )
-            await db.execute(
-                """DELETE FROM chat_history WHERE user_id = ? AND id NOT IN (
-                    SELECT id FROM chat_history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
-                )""",
-                (x_user_id, x_user_id, CHAT_HISTORY_LIMIT)
-            )
-            await db.commit()
+        await chat_repo.append_turn_and_trim(
+            x_user_id,
+            msg.message,
+            ai_response,
+            CHAT_HISTORY_LIMIT,
+            db_path=DATABASE,
+        )
         
         return {"response": ai_response, "action_executed": False}
     
+    except AiNotConfiguredError:
+        return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
     except Exception as e:
         error_msg = str(e)
         if "403" in error_msg or "Forbidden" in error_msg:
@@ -2225,9 +2152,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 @app.delete("/api/chat/history")
 async def clear_chat_history(x_user_id: str = Header(...)):
     """Очистить историю чата."""
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("DELETE FROM chat_history WHERE user_id = ?", (x_user_id,))
-        await db.commit()
+    await chat_repo.clear_history(x_user_id, db_path=DATABASE)
     return {"status": "ok"}
 
 
@@ -2237,18 +2162,11 @@ async def get_chat_history(x_user_id: str = Header(...), limit: int = Query(50, 
     Получить последние сообщения диалога для отображения в UI.
     Возвращаем role + content в хронологическом порядке.
     """
-    async with aiosqlite.connect(DATABASE) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            """SELECT role, content FROM chat_history 
-               WHERE user_id = ?
-               ORDER BY created_at DESC
-               LIMIT ?""",
-            (x_user_id, limit),
-        )
-        rows = await cursor.fetchall()
-    # Возвращаем в хронологическом порядке (от старых к новым)
-    history = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    history = await chat_repo.get_recent_history(
+        x_user_id,
+        limit,
+        db_path=DATABASE,
+    )
     return {"history": history}
 
 
