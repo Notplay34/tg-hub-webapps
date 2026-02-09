@@ -4,8 +4,10 @@ TG Hub — Telegram бот с единым Web App + напоминания о �
 
 import asyncio
 import logging
-import aiosqlite
 from datetime import datetime, timedelta
+
+import aiosqlite
+import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, ReplyKeyboardRemove
 from aiogram.filters import CommandStart
@@ -14,7 +16,7 @@ from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from config import BOT_TOKEN, WEBAPP_HUB_URL
+from config import BOT_TOKEN, WEBAPP_HUB_URL, API_BASE_URL
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,6 +29,31 @@ bot = Bot(
 )
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+
+
+async def call_ai(user_id: int, text: str) -> str:
+    """
+    Вызов ИИ через API /api/chat.
+    Пользуемся тем же ассистентом, что и в веб-приложении.
+    """
+    url = f"{API_BASE_URL.rstrip('/')}/api/chat"
+    payload = {"message": text}
+    headers = {"Content-Type": "application/json", "X-User-Id": str(user_id)}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status}: {body}")
+                data = await resp.json()
+    except Exception as e:
+        logger.exception("AI request failed")
+        return "❌ Не получилось обратиться к ИИ. Попробуй ещё раз чуть позже."
+
+    answer = data.get("response")
+    if not answer:
+        return "😕 ИИ не прислал ответа."
+    return answer
 
 
 def get_main_keyboard() -> InlineKeyboardMarkup:
@@ -65,6 +92,26 @@ async def cmd_start(message: Message):
         text += "\n\n<i>⚠️ WEBAPP_HUB_URL не настроен</i>"
     
     await message.answer(text, reply_markup=kb)
+
+
+@dp.message(F.text)
+async def chat_with_ai(message: Message):
+    """
+    Любой текст (кроме команд) — общение с ИИ.
+    Можно диктовать голосом в поле ввода Telegram — бот получает текст.
+    """
+    text = (message.text or "").strip()
+    # Команды (начинаются с /) не трогаем — вдруг появятся другие хендлеры
+    if not text or text.startswith("/"):
+        return
+
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        return
+
+    await message.answer("🧠 Думаю...", reply_markup=ReplyKeyboardRemove())
+    answer = await call_ai(user_id, text)
+    await message.answer(answer, parse_mode=ParseMode.HTML)
 
 
 async def get_tasks_for_date(date_str: str):
