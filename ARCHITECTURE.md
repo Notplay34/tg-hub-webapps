@@ -19,8 +19,13 @@ TG Hub состоит из двух основных частей:
 - **Services (`tg_hub_bot/services/`)**  
   Бизнес‑логика: работа с напоминаниями, задачами, контактами, интеграция с AI, интерпретация команд пользователя.
 
-- **Repositories (`tg_hub_bot/repositories/`)**  
-  Доступ к SQLite/БД. Содержат SQL и маппинг в доменные модели (задачи, напоминания и т.п.).
+- **Repositories (`tg_hub_bot/repositories/`)**
+  Доступ к данным только через интерфейсы (TaskRepository и др.). Содержат SQL и маппинг в доменные модели. Получают соединение через **DatabaseProvider** из `storage/`; handlers и services не создают соединений и не знают о типе БД.
+
+- **Storage (`storage/`)**
+  - **DatabaseProvider** — единая точка создания соединений с БД (используется при старте приложения).
+  - **bootstrap** — фабрики `get_database_provider()`, `get_tasks_repo()`; репозитории получают провайдер и инкапсулируют всю работу с БД.
+  - Замена SQLite на PostgreSQL: новая реализация провайдера + репозиториев без изменения handlers и services.
 
 - **Models (`tg_hub_bot/models/`)**  
   Доменные модели (dataclasses/Pydantic): `TaskSummary`, `ReminderTask` и др.  
@@ -98,9 +103,9 @@ TG Hub состоит из двух основных частей:
 
 - **Замена/расширение БД**
   - Сейчас используется SQLite (`aiosqlite`) и файл `data/hub.db`.
-  - Репозитории в `tg_hub_bot/repositories/` и `api/repositories/` позволяют:
-    - заменить SQLite на PostgreSQL или другую БД;
-    - добавить новые таблицы/сервисы без изменения хэндлеров.
+  - **Бот**: SQLite полностью изолирован от `bot.py` и handlers. Соединения создаёт только `storage.database.AiosqliteDatabaseProvider`; репозитории (`TaskRepository`) получают провайдер и содержат весь SQL. Для перехода на PostgreSQL: реализовать `PostgresDatabaseProvider` и, при необходимости, `PostgresTaskRepository`; handlers и services не меняются.
+  - **API**: в `api/main.py` по-прежнему есть прямой доступ к БД в эндпоинтах (tasks, people, knowledge, finance и т.д.); для полной изоляции можно ввести такой же слой провайдера и репозиториев.
+  - Репозитории позволяют добавлять новые таблицы/сервисы без изменения хэндлеров.
 
 - **Отделение планировщика**
   - `tg_hub_bot/scheduler.py` инициализируется в `tg_hub_bot/app.py`.

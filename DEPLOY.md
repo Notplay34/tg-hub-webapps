@@ -51,3 +51,24 @@ scp hub\index.html hub\app.js hub\style.css root@194.87.103.157:/opt/tg-hub/hub/
 systemctl restart tg-hub-api
 systemctl restart tg-hub-bot
 ```
+
+---
+
+## Деплой после последних изменений
+
+Что меняли: bootstrap bot.py, вынос AI/scheduler/storage, изоляция БД (DatabaseProvider, TaskRepository).
+
+**На ПК (PowerShell):**
+```powershell
+cd c:\dev\tg_hub
+scp bot.py root@194.87.103.157:/opt/tg-hub/
+scp -r storage root@194.87.103.157:/opt/tg-hub/
+scp -r services root@194.87.103.157:/opt/tg-hub/
+scp tg_hub_bot\handlers\start.py root@194.87.103.157:/opt/tg-hub/tg_hub_bot/handlers/
+scp tg_hub_bot\repositories\tasks.py root@194.87.103.157:/opt/tg-hub/tg_hub_bot/repositories/
+```
+
+**На сервере:**
+```bash
+systemctl restart tg-hub-bot
+```

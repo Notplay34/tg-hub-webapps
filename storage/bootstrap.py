@@ -1,16 +1,28 @@
 """
 Инициализация доступа к БД для бота.
 
-Путь к БД и фабрика репозитория задач — единственная точка входа для работы с хранилищем.
+DatabaseProvider создаётся при старте приложения; репозитории получают его
+и инкапсулируют всю работу с БД. Handlers и bot.py не создают соединений.
 """
 
 from pathlib import Path
 
-from tg_hub_bot.repositories.tasks import SqliteTaskRepository
+from storage.database import AiosqliteDatabaseProvider, DatabaseProvider
+from tg_hub_bot.repositories.tasks import SqliteTaskRepository, TaskRepository
 
 DATABASE = Path("data/hub.db")
 
+_provider: DatabaseProvider | None = None
 
-def get_tasks_repo() -> SqliteTaskRepository:
-    """Возвращает репозиторий задач для напоминаний (SQLite)."""
-    return SqliteTaskRepository(str(DATABASE))
+
+def get_database_provider() -> DatabaseProvider:
+    """Единый провайдер соединений с БД (используется при старте приложения)."""
+    global _provider
+    if _provider is None:
+        _provider = AiosqliteDatabaseProvider(str(DATABASE))
+    return _provider
+
+
+def get_tasks_repo() -> TaskRepository:
+    """Возвращает репозиторий задач для напоминаний."""
+    return SqliteTaskRepository(get_database_provider())

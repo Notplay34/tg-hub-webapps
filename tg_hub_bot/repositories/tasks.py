@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import aiosqlite
 
 from tg_hub_bot.models import TaskSummary
 
+if TYPE_CHECKING:
+    from storage.database import DatabaseProvider
+
 
 @runtime_checkable
 class TaskRepository(Protocol):
+    """Интерфейс репозитория задач. Только методы get/list — без SQL и деталей БД."""
+
     async def get_tasks_for_date(self, for_date: date) -> list[TaskSummary]:
         ...
 
@@ -27,14 +32,19 @@ class TaskRepository(Protocol):
 
 
 class SqliteTaskRepository(TaskRepository):
-    """Репозиторий задач на базе SQLite."""
+    """
+    Репозиторий задач на базе SQLite.
 
-    def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
+    Получает соединение через DatabaseProvider; вся работа с БД и SQL
+    инкапсулирована здесь. Handlers и services не видят ни SQL, ни aiosqlite.
+    """
+
+    def __init__(self, db_provider: "DatabaseProvider") -> None:
+        self._provider = db_provider
 
     async def get_tasks_for_date(self, for_date: date) -> list[TaskSummary]:
         date_str = for_date.isoformat()
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._provider.connection() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -57,7 +67,7 @@ class SqliteTaskRepository(TaskRepository):
 
     async def get_overdue_tasks(self, today: date) -> list[TaskSummary]:
         today_str = today.isoformat()
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._provider.connection() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -87,8 +97,7 @@ class SqliteTaskRepository(TaskRepository):
     ) -> list[TaskSummary]:
         today_str = today.isoformat()
         tomorrow_str = tomorrow.isoformat()
-
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._provider.connection() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -105,7 +114,6 @@ class SqliteTaskRepository(TaskRepository):
                 (today_str, time_str, tomorrow_str, before_key),
             )
             rows = await cursor.fetchall()
-
         return [
             TaskSummary(
                 user_id=str(row["user_id"]),
