@@ -6,13 +6,14 @@ DatabaseProvider создаётся при старте приложения; р
 """
 
 from pathlib import Path
+from typing import Optional
 
 from storage.database import AiosqliteDatabaseProvider, DatabaseProvider
 from tg_hub_bot.repositories.tasks import SqliteTaskRepository, TaskRepository
 
 DATABASE = Path("data/hub.db")
 
-_provider: DatabaseProvider | None = None
+_provider: Optional[DatabaseProvider] = None
 
 
 def get_database_provider() -> DatabaseProvider:

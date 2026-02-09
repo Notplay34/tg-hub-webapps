@@ -28,10 +28,10 @@ async def _handle_chat_with_ai(message: Message, ai_service: AiService) -> None:
 
 
 def register_ai_chat_handler(dp: Dispatcher, ai_service: AiService) -> None:
-    """Регистрирует хендлер сообщений, которые идут в ИИ."""
+    """Регистрирует хендлер сообщений, которые идут в ИИ. Регистрировать ПОСЛЕ /start."""
 
     @dp.message(F.text)
     async def chat_with_ai(message: Message) -> None:  # noqa: D401
-        """Любой текст (кроме команд) — общение с ИИ."""
+        """Любой текст — при командах (/) просто выходим, остальное в ИИ."""
         await _handle_chat_with_ai(message, ai_service)
 
