@@ -42,6 +42,9 @@ class RemindersService:
                     text = f"⏰ <b>Напоминание на сегодня</b>\n\n{task.title}"
                 else:
                     text = f"⏰ <b>Напоминание: завтра срок</b>\n\n{task.title}"
+                title_lower = (task.title or "").lower()
+                if "встреча" in title_lower or "созвон" in title_lower or "звонок" in title_lower:
+                    text += "\n\nПодготовиться?"
                 await self._bot.send_message(int(task.user_id), text)
                 logger.info(
                     "Напоминание по времени отправлено %s: %s",

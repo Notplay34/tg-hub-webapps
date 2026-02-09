@@ -26,7 +26,7 @@ async def _handle_chat_with_ai(message: Message, ai_service: AiService) -> None:
         return
 
     await message.answer("🧠 Думаю...", reply_markup=ReplyKeyboardRemove())
-    answer = await ai_service.ask(user_id, text)
+    answer = await ai_service.generate_response(user_id, text)
     await message.answer(answer, parse_mode=ParseMode.HTML)
 
 

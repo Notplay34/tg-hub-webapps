@@ -52,6 +52,53 @@ app.add_middleware(
 DATABASE = "data/hub.db"
 
 
+async def extract_person_with_ai(text: str):
+    """
+    Извлекает данные контакта из произвольной фразы через ИИ.
+    Возвращает dict с ключами fio, relation, birth_date, strengths, weaknesses или None при ошибке.
+    """
+    prompt = """Из строки пользователя извлеки данные контакта (карточки человека).
+Верни ТОЛЬКО валидный JSON без markdown и комментариев, с ключами:
+- fio: полное ФИО (Фамилия Имя Отчество), одна строка
+- relation: кем приходится (сын, дочь, супруга, коллега и т.д.) или пустая строка
+- birth_date: дата рождения в формате YYYY-MM-DD или null
+- strengths: сильные стороны / положительные черты, одна строка
+- weaknesses: слабые стороны / отрицательные черты, одна строка
+
+Примеры:
+"Кудрявский Сергей Игоревич, сын, 02.09.2020, вредный, очень милый" -> {"fio": "Кудрявский Сергей Игоревич", "relation": "сын", "birth_date": "2020-09-02", "strengths": "очень милый", "weaknesses": "вредный"}
+"Иванов Иван, коллега" -> {"fio": "Иванов Иван", "relation": "коллега", "birth_date": null, "strengths": "", "weaknesses": ""}
+
+Строка пользователя:
+"""
+    try:
+        response = await ai_chat(
+            [{"role": "user", "content": prompt + text.strip()}],
+            model_hint="chat",
+            max_tokens=300,
+            temperature=0.1,
+        )
+        # Убрать возможную обёртку в ```json
+        raw = response.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```\w*\n?", "", raw)
+            raw = re.sub(r"\n?```\s*$", "", raw)
+        data = json.loads(raw)
+        if not isinstance(data.get("fio"), str) or not data["fio"].strip():
+            return None
+        # Нормализуем ключи и пустые значения
+        result = {"fio": data["fio"].strip().title()}
+        for key in ("relation", "birth_date", "strengths", "weaknesses"):
+            val = data.get(key)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                continue
+            result[key] = val.strip() if isinstance(val, str) else val
+        return result
+    except (json.JSONDecodeError, AiNotConfiguredError, Exception) as e:
+        logger.warning("extract_person_with_ai failed: %s", e)
+        return None
+
+
 # === Модели ===
 
 class Task(BaseModel):
@@ -1080,6 +1127,65 @@ from datetime import datetime, timedelta
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _extract_birth_date_from_text(text: str):
+    """Извлекает дату рождения (DD.MM.YYYY или «дата рождения DD.MM.YYYY») из текста. Возвращает (дата в YYYY-MM-DD или None, текст без даты)."""
+    text = text.strip()
+    # «дата рождения 04.06.1996» или просто «04.06.1996»
+    match = re.search(r'(?:дата\s+рождения\s+)?(\d{1,2}\.\d{1,2}\.\d{4})', text, re.IGNORECASE)
+    if not match:
+        return None, text
+    try:
+        d, m, y = match.group(1).split('.')
+        date_iso = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+    except Exception:
+        return None, text
+    rest = (text[:match.start()] + text[match.end():]).strip()
+    rest = re.sub(r'\s+', ' ', rest).strip()
+    return date_iso, rest
+
+
+def _parse_person_roles_strengths_weaknesses(rest: str):
+    """Парсит строку после ФИО: роли, сильные и слабые стороны. Возвращает dict с relation, strengths, weaknesses."""
+    roles = [
+        'мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'супруг', 'супруга', 'сын', 'дочь',
+        'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега',
+        'партнер', 'партнёр', 'партнер по бизнесу', 'партнёр по бизнесу',
+        'бизнес партнер', 'бизнес-партнер', 'компаньон', 'сооснователь', 'совладелец',
+        'начальник', 'директор', 'менеджер', 'клиент',
+        'заказчик', 'поставщик', 'инвестор', 'сосед', 'знакомый'
+    ]
+    weaknesses_words = [
+        'забывчивый', 'забывчива', 'вспыльчивый', 'вспыльчива',
+        'ленивый', 'ленива', 'жадный', 'жадная', 'нервный', 'нервная',
+        'непунктуальный', 'непунктуальна', 'необязательный', 'необязательна'
+    ]
+    data = {}
+    if not rest:
+        return data
+    if ',' in rest or ';' in rest:
+        parts = [p.strip() for p in re.split(r'[,;]', rest) if p.strip()]
+    else:
+        parts = rest.split()
+    found_roles = []
+    strengths = []
+    weaknesses = []
+    for part in parts:
+        wl = part.lower()
+        if wl in roles or any(w in wl for w in ['партнер', 'бизнес', 'работ']):
+            found_roles.append(part)
+        elif wl in weaknesses_words:
+            weaknesses.append(part)
+        else:
+            strengths.append(part)
+    if found_roles:
+        data['relation'] = ', '.join(found_roles)
+    if strengths:
+        data['strengths'] = ', '.join(strengths)
+    if weaknesses:
+        data['weaknesses'] = ', '.join(weaknesses)
+    return data
+
+
 def parse_user_command(message: str, user_id: str):
     """Парсит команды пользователя напрямую, без ИИ."""
     # Очищаем от лишнего шума: эмодзи, повторяющихся пробелов
@@ -1260,6 +1366,103 @@ def parse_user_command(message: str, user_id: str):
                 "title": match.group(1).strip()
             }
     
+    # --- Сначала финансы и цели, чтобы "добавь цель ..." не матчилось как контакт ---
+    # Расход
+    expense_patterns = [
+        r'(?:добавь\s+)?расход\s+([\d\s]+(?:[.,]\d+)?)\s+(?:на\s+)?(.+)',
+        r'потратил[а]?\s+([\d\s]+(?:[.,]\d+)?)\s+(?:на\s+)?(.+)',
+        r'трата\s+([\d\s]+(?:[.,]\d+)?)\s+(?:на\s+)?(.+)',
+    ]
+    for pattern in expense_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            amount_str = m.group(1).replace(',', '.').replace(' ', '').strip()
+            rest = m.group(2).strip()
+            try:
+                amount = float(amount_str)
+            except ValueError:
+                continue
+            if amount <= 0:
+                continue
+            category = rest
+            for suffix in [' сегодня', ' завтра', ' послезавтра']:
+                if category.endswith(suffix):
+                    category = category[:-len(suffix)].strip()
+            date_match = re.search(r'\s+(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$', category)
+            if date_match:
+                category = re.sub(r'\s+\d{1,2}\.\d{1,2}(?:\.\d{4})?\s*$', '', category).strip()
+            if not category or len(category) > 100:
+                category = "Прочее"
+            tx_date = datetime.now().date().isoformat()
+            if 'завтра' in rest:
+                tx_date = (datetime.now().date() + timedelta(days=1)).isoformat()
+            elif 'послезавтра' in rest:
+                tx_date = (datetime.now().date() + timedelta(days=2)).isoformat()
+            elif date_match:
+                try:
+                    day, month = int(date_match.group(1)), int(date_match.group(2))
+                    year = int(date_match.group(3)) if date_match.group(3) else datetime.now().year
+                    tx_date = datetime(year, month, day).date().isoformat()
+                except (ValueError, IndexError):
+                    pass
+            return {"action": "add_finance_transaction", "type": "expense", "amount": amount, "category": category, "date": tx_date}
+    
+    # Доход
+    income_patterns = [
+        r'(?:добавь\s+)?доход\s+([\d\s]+(?:[.,]\d+)?)\s*(.*)',
+        r'получил[а]?\s+([\d\s]+(?:[.,]\d+)?)\s*(.*)',
+    ]
+    for pattern in income_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            amount_str = m.group(1).replace(',', '.').replace(' ', '').strip()
+            rest = (m.group(2) if m.lastindex >= 2 else "").strip()
+            try:
+                amount = float(amount_str)
+            except ValueError:
+                continue
+            if amount <= 0:
+                continue
+            category = rest if rest and len(rest) <= 100 else "Доход"
+            tx_date = datetime.now().date().isoformat()
+            return {"action": "add_finance_transaction", "type": "income", "amount": amount, "category": category, "date": tx_date}
+    
+    # Цель (финансовая)
+    goal_patterns = [
+        r'создай\s+(?:финансовую\s+)?цель\s+(.+?)\s+([\d\s]+(?:[.,]\d+)?)\s*$',
+        r'добавь\s+цель\s+(.+?)\s+([\d\s]+(?:[.,]\d+)?)\s*$',
+    ]
+    for pattern in goal_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            title = m.group(1).strip()
+            amount_str = m.group(2).replace(',', '.').replace(' ', '').strip()
+            if not title or len(title) > 200:
+                continue
+            try:
+                target = float(amount_str)
+            except ValueError:
+                continue
+            if target <= 0:
+                continue
+            return {"action": "add_finance_goal", "title": title[:200], "target_amount": target}
+    
+    # Заметка в базу знаний
+    note_patterns = [
+        r'добавь\s+заметку\s+(.+)',
+        r'добавь\s+в\s+базу\s+(?:знаний\s+)?(.+)',
+        r'запиши\s+в\s+базу\s+(?:знаний\s+)?(.+)',
+        r'добавь\s+(?:в\s+)?базу\s+знаний\s+(.+)',
+    ]
+    for pattern in note_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            text = m.group(1).strip()
+            if not text or len(text) > 500:
+                continue
+            title = text[:150] + ("..." if len(text) > 150 else "")
+            return {"action": "create_knowledge", "title": title, "content": text}
+    
     # Создать контакт/карточку (явные фразы)
     person_patterns = [
         r'создай карточку[:\s]+(.+)',
@@ -1291,47 +1494,8 @@ def parse_user_command(message: str, user_id: str):
         data = {}
         if birth_date:
             data['birth_date'] = birth_date
-        
-        # Парсим характеристики: роли, сильные и слабые стороны
         if rest:
-            roles = [
-                'мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'сын', 'дочь',
-                'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега',
-                'партнер', 'партнёр', 'партнер по бизнесу', 'партнёр по бизнесу',
-                'бизнес партнер', 'бизнес-партнер', 'компаньон', 'сооснователь', 'совладелец',
-                'начальник', 'директор', 'менеджер', 'клиент',
-                'заказчик', 'поставщик', 'инвестор', 'сосед', 'знакомый'
-            ]
-            weaknesses_words = ['забывчивый', 'забывчива', 'вспыльчивый', 'вспыльчива', 
-                               'ленивый', 'ленива', 'жадный', 'жадная', 'нервный', 'нервная',
-                               'непунктуальный', 'непунктуальна', 'необязательный', 'необязательна']
-            
-            # Разбиваем по запятым / точкам с запятой
-            if ',' in rest or ';' in rest:
-                parts = [w.strip() for w in re.split(r'[,;]', rest) if w.strip()]
-            else:
-                parts = rest.split()
-            
-            found_roles = []
-            strengths = []
-            weaknesses = []
-            
-            for part in parts:
-                wl = part.lower()
-                if wl in roles or any(w in wl for w in ['партнер', 'бизнес', 'работ']):
-                    found_roles.append(part)
-                elif wl in weaknesses_words:
-                    weaknesses.append(part)
-                else:
-                    strengths.append(part)
-            
-            if found_roles:
-                data['relation'] = ', '.join(found_roles)
-            if strengths:
-                data['strengths'] = ', '.join(strengths)
-            if weaknesses:
-                data['weaknesses'] = ', '.join(weaknesses)
-        
+            data.update(_parse_person_roles_strengths_weaknesses(rest))
         logger.info(f"FIO pattern with date: {fio}, birth: {birth_date}, data: {data}")
         
         return {
@@ -1341,112 +1505,84 @@ def parse_user_command(message: str, user_id: str):
         }
     
     # ФИО без даты (2–4 слова + роль/характеристики)
-    # "добавь иванов иван мама, директор" или "добавь албегова наталья сергеевна мама, компаньон"
+    # Только если в rest есть запятая (ФИО, роль, черты) или известное слово-роль — иначе "добавь цель отпуск 200000" попадёт сюда
     fio_no_date = r'добавь\s+([а-яё]+\s+[а-яё]+(?:\s+[а-яё]+){0,2})\s+(.+)'
     fio_match2 = re.search(fio_no_date, msg_lower)
     if fio_match2:
         fio = fio_match2.group(1).strip()
         rest = fio_match2.group(2).strip()
-        
-        # Проверяем что это не задача
         task_words = ['купить', 'позвонить', 'сделать', 'проверить', 'написать', 'отправить', 'забрать', 'оплатить']
-        if any(word in fio.lower() for word in task_words):
-            pass  # Это задача, не контакт
+        # Не считать контактом: "добавь цель отпуск 200000", "добавь расход 500" и т.д.
+        first_word = fio.split()[0].lower() if fio.split() else ''
+        if first_word in ('цель', 'расход', 'доход', 'задачу', 'контакт', 'карточку', 'заметку', 'человека'):
+            pass
         else:
-            data = {}
-            
-            # Списки для распределения
-            roles = [
-                'мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'сын', 'дочь',
-                'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега',
-                'партнер', 'партнёр', 'партнер по бизнесу', 'партнёр по бизнесу',
-                'бизнес партнер', 'бизнес-партнер', 'компаньон', 'сооснователь', 'совладелец',
-                'начальник', 'директор', 'менеджер', 'клиент',
-                'заказчик', 'поставщик', 'инвестор', 'сосед', 'знакомый'
+            role_hint_words = [
+                'мама', 'папа', 'сын', 'дочь', 'муж', 'жена', 'супруг', 'супруга', 'коллега', 'друг', 'подруга',
+                'начальник', 'клиент', 'партнер', 'компаньон', 'директор', 'брат', 'сестра', 'дед', 'бабушка'
             ]
-            
-            weaknesses_words = ['забывчивый', 'забывчива', 'вспыльчивый', 'вспыльчива', 
-                               'ленивый', 'ленива', 'жадный', 'жадная', 'нервный', 'нервная',
-                               'непунктуальный', 'непунктуальна', 'необязательный', 'необязательна']
-            
-            # Разбиваем по запятым (блоки смысла)
-            if ',' in rest or ';' in rest:
-                words = [w.strip() for w in re.split(r'[,;]', rest) if w.strip()]
+            rest_lower = rest.lower()
+            has_role_hint = ',' in rest or any(r in rest_lower for r in role_hint_words)
+            if any(word in fio.lower() for word in task_words):
+                pass
+            elif not has_role_hint and re.match(r'^[\d\s.,]+$', rest.replace(' ', '')):
+                pass
             else:
-                words = rest.split()
-            
-            found_roles = []
-            strengths = []
-            weaknesses = []
-            
-            for word in words:
-                word_lower = word.lower()
-                if word_lower in roles:
-                    found_roles.append(word)
-                elif word_lower in weaknesses_words:
-                    weaknesses.append(word)
-                elif any(w in word_lower for w in ['партнер', 'бизнес', 'работ']):
-                    found_roles.append(word)
-                else:
-                    strengths.append(word)
-            
-            if found_roles:
-                data['relation'] = ', '.join(found_roles)
-            if strengths:
-                data['strengths'] = ', '.join(strengths)
-            if weaknesses:
-                data['weaknesses'] = ', '.join(weaknesses)
-            
-            logger.info(f"FIO pattern without date: {fio}, data: {data}")
-            
-            return {
-                "action": "create_person",
-                "fio": fio.title(),
-                **data
-            }
+                birth_date, rest = _extract_birth_date_from_text(rest)
+                data = {}
+                if birth_date:
+                    data['birth_date'] = birth_date
+                parsed = _parse_person_roles_strengths_weaknesses(rest)
+                data.update(parsed)
+                logger.info(f"FIO pattern without date: {fio}, data: {data}")
+                return {
+                    "action": "create_person",
+                    "fio": fio.title(),
+                    **data
+                }
     
+    roles_list = [
+        'мама', 'папа', 'отец', 'мать', 'брат', 'сестра', 'муж', 'жена', 'супруг', 'супруга', 'сын', 'дочь',
+        'дядя', 'тётя', 'тетя', 'дед', 'бабушка', 'друг', 'подруга', 'коллега',
+        'партнер', 'партнёр', 'компаньон', 'сооснователь', 'совладелец',
+        'начальник', 'директор', 'менеджер', 'клиент', 'заказчик', 'поставщик', 'инвестор', 'сосед', 'знакомый'
+    ]
     for pattern in person_patterns:
         match = re.search(pattern, msg_lower)
         if match:
             text = match.group(1).strip()
-            # Парсим данные из текста
-            # Формат: ФИО [дата] [роль], [характеристики]
-            
-            parts = re.split(r'[,;]', text)
-            fio = parts[0].strip()
-            
-            # Ищем дату рождения в ФИО (DD.MM.YYYY)
-            birth_match = re.search(r'(\d{1,2}\.\d{1,2}\.\d{4})', fio)
-            birth_date = None
-            if birth_match:
-                birth_date = birth_match.group(1)
-                # Конвертируем в YYYY-MM-DD
-                try:
-                    d, m, y = birth_date.split('.')
-                    birth_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-                except Exception:
-                    birth_date = None
-                fio = re.sub(r'\s*\d{1,2}\.\d{1,2}\.\d{4}\s*', ' ', fio).strip()
-            
-            # Остальные части - характеристики
+            # Сначала извлекаем дату рождения из всего текста
+            birth_date, text = _extract_birth_date_from_text(text)
             data = {}
             if birth_date:
                 data['birth_date'] = birth_date
-            
-            if len(parts) > 1:
-                # Первая часть после ФИО - роль / кем приходится
-                relation = parts[1].strip()
-                if relation:
-                    data['relation'] = relation
-                
-                # Остальное - в strengths или notes
-                if len(parts) > 2:
-                    characteristics = ', '.join(p.strip() for p in parts[2:] if p.strip())
-                    if characteristics:
-                        data['strengths'] = characteristics
-            
+
+            parts = [p.strip() for p in re.split(r'[,;]', text) if p.strip()]
+            if not parts:
+                continue
+            fio_part = parts[0]
+            # Последнее слово в первой части может быть ролью (супруга, коллега и т.д.)
+            words_fio = fio_part.split()
+            if len(words_fio) >= 2 and words_fio[-1].lower() in roles_list:
+                fio = ' '.join(words_fio[:-1]).strip()
+                data['relation'] = words_fio[-1].title()
+            else:
+                fio = fio_part
+            # Остальные части — характеристики (роли/сильные/слабые)
+            rest_parts = parts[1:]
+            if rest_parts:
+                rest_str = ', '.join(rest_parts)
+                parsed = _parse_person_roles_strengths_weaknesses(rest_str)
+                if parsed.get('relation') and not data.get('relation'):
+                    data['relation'] = parsed['relation']
+                elif parsed.get('relation') and data.get('relation'):
+                    data['relation'] = data['relation'] + ', ' + parsed['relation']
+                if parsed.get('strengths'):
+                    data['strengths'] = parsed['strengths']
+                if parsed.get('weaknesses'):
+                    data['weaknesses'] = parsed['weaknesses']
+
             logger.info(f"Creating person: {fio}, data: {data}")
-            
             return {
                 "action": "create_person",
                 "fio": fio.title(),
@@ -1496,103 +1632,6 @@ def parse_user_command(message: str, user_id: str):
             "fio_query": fio_query,
             **data
         }
-    
-    # --- Расход: "добавь расход 500 на еду [сегодня]", "расход 500 еда", "потратил 500 на еду" ---
-    expense_patterns = [
-        r'(?:добавь\s+)?расход\s+([\d\s]+(?:[.,]\d+)?)\s+(?:на\s+)?(.+)',
-        r'потратил[а]?\s+([\d\s]+(?:[.,]\d+)?)\s+(?:на\s+)?(.+)',
-        r'трата\s+([\d\s]+(?:[.,]\d+)?)\s+(?:на\s+)?(.+)',
-    ]
-    for pattern in expense_patterns:
-        m = re.search(pattern, msg_lower)
-        if m:
-            amount_str = m.group(1).replace(',', '.').replace(' ', '').strip()
-            rest = m.group(2).strip()
-            try:
-                amount = float(amount_str)
-            except ValueError:
-                continue
-            if amount <= 0:
-                continue
-            # Убираем дату из конца: "еду сегодня", "еда завтра", "еда 15.03"
-            category = rest
-            for suffix in [' сегодня', ' завтра', ' послезавтра']:
-                if category.endswith(suffix):
-                    category = category[:-len(suffix)].strip()
-            date_match = re.search(r'\s+(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$', category)
-            if date_match:
-                category = re.sub(r'\s+\d{1,2}\.\d{1,2}(?:\.\d{4})?\s*$', '', category).strip()
-            if not category or len(category) > 100:
-                category = "Прочее"
-            tx_date = datetime.now().date().isoformat()
-            if 'завтра' in rest:
-                tx_date = (datetime.now().date() + timedelta(days=1)).isoformat()
-            elif 'послезавтра' in rest:
-                tx_date = (datetime.now().date() + timedelta(days=2)).isoformat()
-            elif date_match:
-                try:
-                    day, month = int(date_match.group(1)), int(date_match.group(2))
-                    year = int(date_match.group(3)) if date_match.group(3) else datetime.now().year
-                    tx_date = datetime(year, month, day).date().isoformat()
-                except (ValueError, IndexError):
-                    pass
-            return {"action": "add_finance_transaction", "type": "expense", "amount": amount, "category": category, "date": tx_date}
-    
-    # --- Доход: "добавь доход 3000", "доход 3000 зарплата" ---
-    income_patterns = [
-        r'(?:добавь\s+)?доход\s+([\d\s]+(?:[.,]\d+)?)\s*(.*)',
-        r'получил[а]?\s+([\d\s]+(?:[.,]\d+)?)\s*(.*)',
-    ]
-    for pattern in income_patterns:
-        m = re.search(pattern, msg_lower)
-        if m:
-            amount_str = m.group(1).replace(',', '.').replace(' ', '').strip()
-            rest = (m.group(2) if m.lastindex >= 2 else "").strip()
-            try:
-                amount = float(amount_str)
-            except ValueError:
-                continue
-            if amount <= 0:
-                continue
-            category = rest if rest and len(rest) <= 100 else "Доход"
-            tx_date = datetime.now().date().isoformat()
-            return {"action": "add_finance_transaction", "type": "income", "amount": amount, "category": category, "date": tx_date}
-    
-    # --- Цель: "создай цель отпуск 200000", "добавь цель машина 500000" ---
-    goal_patterns = [
-        r'создай\s+(?:финансовую\s+)?цель\s+(.+?)\s+([\d\s]+(?:[.,]\d+)?)\s*$',
-        r'добавь\s+цель\s+(.+?)\s+([\d\s]+(?:[.,]\d+)?)\s*$',
-    ]
-    for pattern in goal_patterns:
-        m = re.search(pattern, msg_lower)
-        if m:
-            title = m.group(1).strip()
-            amount_str = m.group(2).replace(',', '.').replace(' ', '').strip()
-            if not title or len(title) > 200:
-                continue
-            try:
-                target = float(amount_str)
-            except ValueError:
-                continue
-            if target <= 0:
-                continue
-            return {"action": "add_finance_goal", "title": title[:200], "target_amount": target}
-    
-    # --- Заметка в базу знаний: "добавь заметку про встречу", "запиши в базу ..." ---
-    note_patterns = [
-        r'добавь\s+заметку\s+(.+)',
-        r'добавь\s+в\s+базу\s+(?:знаний\s+)?(.+)',
-        r'запиши\s+в\s+базу\s+(?:знаний\s+)?(.+)',
-        r'добавь\s+(?:в\s+)?базу\s+знаний\s+(.+)',
-    ]
-    for pattern in note_patterns:
-        m = re.search(pattern, msg_lower)
-        if m:
-            text = m.group(1).strip()
-            if not text or len(text) > 500:
-                continue
-            title = text[:150] + ("..." if len(text) > 150 else "")
-            return {"action": "create_knowledge", "title": title, "content": text}
     
     return None
 
@@ -1932,6 +1971,18 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
     # Сначала проверяем прямые команды (без ИИ)
     direct_command = parse_user_command(text_raw, x_user_id)
     if direct_command:
+        # Для «добавь контакт» пробуем извлечь поля через ИИ — так корректно разбираются любые формулировки
+        if direct_command.get("action") == "create_person" and is_ai_configured():
+            try:
+                ai_person = await extract_person_with_ai(text_raw)
+                if ai_person and ai_person.get("fio"):
+                    direct_command = {"action": "create_person", "fio": ai_person["fio"]}
+                    for k in ("relation", "birth_date", "strengths", "weaknesses", "workplace", "benefits", "problems"):
+                        if ai_person.get(k):
+                            direct_command[k] = ai_person[k]
+                    logger.info("create_person: using AI extraction %s", direct_command)
+            except Exception as e:
+                logger.warning("AI person extraction failed, using regex: %s", e)
         result = await execute_ai_action(direct_command, x_user_id)
         logger.info(f"Direct command executed: {direct_command['action']} -> {result}")
         
@@ -2088,15 +2139,14 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 • Расход по категориям: {json.dumps(expenses_by_category, ensure_ascii=False) if expenses_by_category else "нет"}
 • Лимиты по категориям (потрачено / лимит): {json.dumps(limits_summary, ensure_ascii=False) if limits_summary else "нет"}
 
-🔧 КОМАНДЫ (система выполняет сама, не ты):
-Пользователь может писать в чат — и система сразу создаёт запись. Ты только подсказываешь формулировки.
+🔧 КОМАНДЫ (система выполняет по точной фразе; не путай тип записи):
 - Задача: "создай задачу купить молоко на завтра", "выполнено купить молоко"
-- Контакт: "добавь контакт Иванов Иван 01.01.1990 компаньон"
+- Контакт (карточка человека): "добавь контакт Иванов Иван, сын, 01.01.1990" или "добавь контакт ФИО, роль, черты"
 - Расход: "добавь расход 500 на еду", "расход 300 транспорт"
 - Доход: "добавь доход 3000 зарплата"
-- Цель: "создай цель отпуск 200000"
+- Цель (финансовая): "добавь цель отпуск 200000" или "добавь цель название сумма"
 - Заметка: "добавь заметку про встречу с Иваном"
-Если спрашивают "как добавить?" — дай точную фразу из списка выше, без лишних слов.
+Если пользователь хочет добавить цель — подскажи фразу с словом "цель" и суммой. Если контакт — фразу с "добавь контакт" и ФИО. Не подставляй одно вместо другого.
 
 🎯 Формат ответа:
 1) 1–2 предложения по сути.
@@ -2108,9 +2158,10 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 💰 По финансам: бюджет, цели, лимиты. Если лимит по категории превышен — скажи прямо. Не давай советов по акциям/крипте.
 
 📌 Правила:
-- Пиши КРАТКО, по-русски. Без воды.
+- Пиши КРАТКО, по-русски. Без воды. Тон — человекоподобный, тёплый, как личный ассистент.
 - Опирайся только на данные выше и контекст диалога. Не придумывай факты.
-- Не говори "я создал задачу" — действия выполняет система по команде пользователя. Ты лишь подсказываешь команды или анализируешь данные."""
+- Не говори "я создал задачу" — действия выполняет система по команде пользователя. Ты лишь подсказываешь команды или анализируешь данные.
+- Проактивность: если видишь в задачах встречу/созвон/звонок сегодня или скоро — предложи подготовиться или напомни, что стоит проверить. На вопросы вроде «что у меня сегодня?» — собери из задач и контекста один понятный ответ."""
 
     if not is_ai_configured():
         return {"response": "ИИ не настроен. Установите OPENROUTER_API_KEY в .env"}
