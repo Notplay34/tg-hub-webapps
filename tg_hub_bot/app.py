@@ -23,7 +23,7 @@ from aiogram.types import (
 from config import API_BASE_URL, BOT_TOKEN, WEBAPP_HUB_URL
 from tg_hub_bot.handlers.ai_chat import register_ai_chat_handler
 from tg_hub_bot.repositories.tasks import SqliteTaskRepository
-from tg_hub_bot.scheduler import create_scheduler, start_scheduler
+from tg_hub_bot.scheduler import SchedulerService
 from tg_hub_bot.services.ai import ApiAiService
 from tg_hub_bot.services.reminders import RemindersService
 
@@ -40,7 +40,7 @@ bot = Bot(
 dp = Dispatcher()
 tasks_repo = SqliteTaskRepository(DATABASE)
 reminders_service = RemindersService(bot, tasks_repo)
-scheduler = create_scheduler(reminders_service)
+scheduler_service = SchedulerService(reminders_service)
 ai_service = ApiAiService(API_BASE_URL)
 
 # Регистрация хендлеров
@@ -91,7 +91,7 @@ async def run() -> None:
     """Точка запуска бота (раньше main() в bot.py)."""
     logger.info("Запуск бота...")
 
-    start_scheduler(scheduler)
+    scheduler_service.start()
 
     await dp.start_polling(bot)
 

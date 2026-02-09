@@ -35,17 +35,17 @@ TG Hub состоит из двух основных частей:
   Генерация всех inline/Reply‑клавиатур для Telegram.
 
 - **Scheduler (`tg_hub_bot/scheduler.py`)**  
-  Обёртка над APScheduler:
-  - `create_scheduler(reminders_service)` — создаёт экземпляр планировщика и регистрирует задачи.
-  - `start_scheduler(scheduler)` — запускает планировщик.
+  **SchedulerService** — изолированный сервис планировщика:
+  - инициализирует и регистрирует задачи внутри себя (9:00, 12:00, 20:00, каждую минуту);
+  - интерфейс: `start()`, `add_reminder(job_id, callback, trigger)`, `remove_reminder(job_id)`;
+  - `bot.py` только вызывает `scheduler_service.start()` и не знает про APScheduler;
+  - handlers не работают с планировщиком напрямую; при необходимости используют SchedulerService;
+  - замена на внешний воркер — новая реализация `SchedulerServiceProtocol` без изменения bot и handlers.
 
 - **App (`tg_hub_bot/app.py`)**  
-  Точка сборки бота:
-  - инициализация `Bot`, `Dispatcher`, scheduler;
-  - создание экземпляров репозиториев, сервисов, AI‑клиента;
-  - регистрация handlers и запуск polling.
+  Альтернативная точка сборки бота (основной entrypoint — корневой `bot.py`).
 
-**Entrypoint**: корневой `bot.py` — тонкий файл, который импортирует `run()` из `tg_hub_bot.app` и запускает его через `asyncio.run()`.
+**Entrypoint**: корневой `bot.py` — создание Bot/Dispatcher, сервисов, регистрация handlers, `scheduler_service.start()`, polling.
 
 ---
 
@@ -79,9 +79,9 @@ TG Hub состоит из двух основных частей:
 ## Планировщик и память чата
 
 - **Планировщик (бот)**
-  - Реализован в `tg_hub_bot/scheduler.py`.
-  - Отвечает за напоминания и периодические задачи.
-  - Может быть вынесен в отдельный процесс/воркер (entrypoint, отдельный `uvicorn`/`python`).
+  - **SchedulerService** в `tg_hub_bot/scheduler.py`: инкапсулирует APScheduler, регистрирует напоминания.
+  - `bot.py` только вызывает `scheduler_service.start()`; не знает про APScheduler.
+  - Может быть вынесен в отдельный процесс/воркер (новая реализация SchedulerServiceProtocol).
 
 - **Память чата (API)**
   - Константы в `api/main.py`:
@@ -108,8 +108,9 @@ TG Hub состоит из двух основных частей:
   - Репозитории позволяют добавлять новые таблицы/сервисы без изменения хэндлеров.
 
 - **Отделение планировщика**
-  - `tg_hub_bot/scheduler.py` инициализируется в `tg_hub_bot/app.py`.
-  - Можно вынести запуск scheduler в отдельный процесс (например, отдельный сервис systemd или контейнер), который использует те же репозитории и модели.
+  - SchedulerService создаётся через `create_scheduler_service(reminders_service)` в `bot.py`/`app.py`.
+  - Замена на внешний воркер: реализовать другой класс, удовлетворяющий `SchedulerServiceProtocol`, без изменений в bot и handlers.
+  - Можно вынести запуск в отдельный процесс (systemd/контейнер), использующий те же RemindersService и репозитории.
 
 - **Расширение доменной модели**
   - Для задач/людей/финансов можно добавлять новые поля:

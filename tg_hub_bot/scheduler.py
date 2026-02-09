@@ -1,9 +1,22 @@
+"""
+Сервис планировщика напоминаний.
+
+Инкапсулирует APScheduler: инициализация, регистрация задач, start.
+Handlers и bot.py работают только с SchedulerService (start, add_reminder, remove_reminder).
+В будущем можно заменить на внешний воркер без изменения вызывающего кода.
+"""
+
+# ⚠️ Infrastructure boundary: APScheduler implementation
+# Do not import this module outside services layer
+
+
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from typing import Any, Callable, Protocol
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.cron import CronTrigger
 
 
@@ -11,10 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class RemindersServiceProtocol(Protocol):
-    """
-    Минимальный интерфейс сервиса напоминаний,
-    который нужен планировщику.
-    """
+    """Минимальный интерфейс сервиса напоминаний для планировщика."""
 
     async def send_morning_reminder(self) -> None: ...
 
@@ -25,65 +35,82 @@ class RemindersServiceProtocol(Protocol):
     async def send_reminders_by_time(self) -> None: ...
 
 
-def create_scheduler(reminders_service: RemindersServiceProtocol) -> AsyncIOScheduler:
+class SchedulerServiceProtocol(Protocol):
+    """Интерфейс сервиса планировщика. Замена на внешний воркер — новая реализация без смены handlers."""
+
+    def start(self) -> None: ...
+
+    def add_reminder(self, job_id: str, callback: Callable[[], Any], *, trigger: BaseTrigger) -> None: ...
+
+    def remove_reminder(self, job_id: str) -> bool: ...
+
+
+class SchedulerService:
     """
-    Создаёт и настраивает планировщик, но НЕ запускает его.
+    Сервис планировщика: запуск и управление напоминаниями.
 
-    Вся логика расписания сосредоточена здесь, чтобы в будущем
-    можно было вынести scheduler в отдельный процесс/воркер.
+    Реализует SchedulerServiceProtocol. bot.py только вызывает .start().
+    Handlers используют add_reminder/remove_reminder при необходимости.
+    Реализация (APScheduler) скрыта; можно заменить на внешний воркер.
     """
-    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
-    # Утром в 9:00 — задачи на сегодня
-    scheduler.add_job(
-        reminders_service.send_morning_reminder,
-        CronTrigger(hour=9, minute=0),
-        id="morning_reminder",
-        replace_existing=True,
-    )
+    def __init__(self, reminders_service: RemindersServiceProtocol) -> None:
+        self._reminders = reminders_service
+        self._scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+        self._register_default_jobs()
 
-    # Вечером в 20:00 — задачи на завтра
-    scheduler.add_job(
-        reminders_service.send_evening_reminder,
-        CronTrigger(hour=20, minute=0),
-        id="evening_reminder",
-        replace_existing=True,
-    )
+    def _register_default_jobs(self) -> None:
+        """Регистрирует стандартные напоминания (9:00, 12:00, 20:00, каждую минуту)."""
+        self._scheduler.add_job(
+            self._reminders.send_morning_reminder,
+            CronTrigger(hour=9, minute=0),
+            id="morning_reminder",
+            replace_existing=True,
+        )
+        self._scheduler.add_job(
+            self._reminders.send_evening_reminder,
+            CronTrigger(hour=20, minute=0),
+            id="evening_reminder",
+            replace_existing=True,
+        )
+        self._scheduler.add_job(
+            self._reminders.send_overdue_reminder,
+            CronTrigger(hour=12, minute=0),
+            id="overdue_reminder",
+            replace_existing=True,
+        )
+        self._scheduler.add_job(
+            self._reminders.send_reminders_by_time,
+            CronTrigger(minute="*"),
+            id="time_based_reminder",
+            replace_existing=True,
+        )
+        logger.info(
+            "Scheduler настроен: 9:00, 12:00, 20:00 и каждую минуту для персональных напоминаний",
+        )
 
-    # Днём в 12:00 — просроченные задачи
-    scheduler.add_job(
-        reminders_service.send_overdue_reminder,
-        CronTrigger(hour=12, minute=0),
-        id="overdue_reminder",
-        replace_existing=True,
-    )
+    def start(self) -> None:
+        """Запускает планировщик. Единственный метод, который вызывает bot.py."""
+        if self._scheduler.running:
+            logger.info("Scheduler уже запущен, повторный старт пропущен")
+            return
+        logger.info("Запуск scheduler для напоминаний...")
+        self._scheduler.start()
 
-    # Каждую минуту — персональное время из карточки задачи
-    scheduler.add_job(
-        reminders_service.send_reminders_by_time,
-        CronTrigger(minute="*"),
-        id="time_based_reminder",
-        replace_existing=True,
-    )
+    def add_reminder(
+        self,
+        job_id: str,
+        callback: Callable[[], Any],
+        *,
+        trigger: BaseTrigger,
+    ) -> None:
+        """Добавить задачу напоминания (для handlers и будущего расширения)."""
+        self._scheduler.add_job(callback, trigger, id=job_id, replace_existing=True)
 
-    logger.info(
-        "Scheduler настроен: 9:00, 12:00, 20:00 и каждую минуту для персональных напоминаний",
-    )
-
-    return scheduler
-
-
-def start_scheduler(scheduler: AsyncIOScheduler) -> None:
-    """
-    Запускает планировщик.
-
-    Вынесено в отдельную функцию, чтобы можно было гибко управлять
-    запуском (например, отключать scheduler в отдельных процессах).
-    """
-    if scheduler.running:
-        logger.info("Scheduler уже запущен, повторный старт пропущен")
-        return
-
-    logger.info("Запуск scheduler для напоминаний...")
-    scheduler.start()
-
+    def remove_reminder(self, job_id: str) -> bool:
+        """Удалить задачу по id. Возвращает True, если задача была удалена."""
+        try:
+            self._scheduler.remove_job(job_id)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
