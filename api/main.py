@@ -16,9 +16,9 @@ load_dotenv()
 
 # Память чата
 CHAT_HISTORY_LIMIT = 80          # сколько последних сообщений держим "сырыми"
-CHAT_CONTEXT_MESSAGES = 24      # сколько последних сообщений отправляем в ИИ (меньше = быстрее, без старых фактов)
-CHAT_SUMMARY_CHUNK = 40         # сколько старых сообщений сжимаем за один раз
-CHAT_SUMMARY_THRESHOLD = 200    # с какого общего количества начинаем сжатие
+CHAT_CONTEXT_MESSAGES = 24       # сколько последних сообщений отправляем в ИИ (меньше = быстрее, без старых фактов)
+CHAT_SUMMARY_CHUNK = 40          # сколько старых сообщений сжимаем за один раз
+CHAT_SUMMARY_THRESHOLD = 200     # с какого общего количества начинаем сжатие
 
 """
 Импортируем AI‑клиент и репозиторий истории чата.
@@ -32,6 +32,7 @@ try:
         AiNotConfiguredError,
     )
     from api.repositories import chat_history as chat_repo
+    from api.agent_core import AgentCore
 except ImportError:  # fallback для запуска из каталога api
     from services.ai_client import (  # type: ignore[no-redef]
         chat as ai_chat,
@@ -39,6 +40,7 @@ except ImportError:  # fallback для запуска из каталога api
         AiNotConfiguredError,
     )
     from repositories import chat_history as chat_repo  # type: ignore[no-redef]
+    from agent_core import AgentCore  # type: ignore[no-redef]
 
 app = FastAPI(title="TG Hub API")
 
@@ -51,6 +53,9 @@ app.add_middleware(
 )
 
 DATABASE = "data/hub.db"
+
+# Agent Core — единый экземпляр для работы с состоянием агента
+agent_core = AgentCore(DATABASE)
 
 
 async def extract_person_with_ai(text: str):
@@ -442,6 +447,17 @@ async def init_db():
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_chat_user ON chat_history(user_id, created_at DESC)")
+
+        # Состояние агента (AgentState v1)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS agent_state (
+                user_id TEXT PRIMARY KEY,
+                persona TEXT,
+                active_goals TEXT,
+                recent_actions TEXT,
+                memory_summary TEXT
+            )
+        """)
         
         # Миграция: добавляем person_id если нет
         try:
