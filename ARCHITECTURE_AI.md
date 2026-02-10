@@ -84,6 +84,50 @@
 
 ---
 
+## Agent Core v1
+
+Для того чтобы ассистент вёл себя как агент (а не просто реактивный чат),
+добавлен отдельный слой **AgentCore** в API.
+
+### AgentState
+
+Минимальное устойчивое состояние на пользователя:
+
+- `user_id`
+- `persona` — фиксированная личность ассистента (тон, стиль, роль)
+- `active_goals: list[str]` — актуальные цели пользователя по версии агента
+- `recent_actions: list[str]` — краткие записи последних решений агента
+- `memory_summary: str` — краткая долговременная память (1–2 предложения)
+
+Хранится в таблице `agent_state (user_id PRIMARY KEY, ...)`. Обновляется после каждого диалога.
+
+### Поток через AgentCore
+
+Для обычного чата (когда нет прямой команды / спец-кнопки) теперь используется цепочка:
+
+1. **Load AgentState**: `state = agent_core.load_state(user_id)`
+2. **Intent Analysis**: `intent = agent_core.analyze_intent(message, direct_command)`
+   - `direct_action`, `finance_question`, `tasks_question`, `planning`, `question`, `smalltalk`
+3. **Context Builder**: API как раньше собирает данные (tasks, people, knowledge, finance)
+4. **Decision + Persona/Memory**:
+   - строится `base_prompt` (данные пользователя);
+   - AgentCore расширяет его: `system_prompt = agent_core.build_system_prompt(base_prompt, state, intent)`
+5. **LLM**: `ai_client.chat(messages)` с новым `system_prompt`
+6. **Memory Writer**:
+   - `agent_core.update_memory_after_turn(state, user_message, assistant_reply, decision)`
+   - AgentState сохраняется в таблицу `agent_state`.
+
+LLM остаётся той же моделью, но работает как «мозг под контролем агента»:
+личность, память и решения задаются AgentCore, а не самим промптом «на лету».
+
+### Диагностика
+
+Для отладки есть эндпоинт `GET /api/agent_state`:
+
+- читает X-User-Id,
+- возвращает сериализованный AgentState (persona, active_goals, memory_summary, recent_actions).
+
+
 ## Расширение
 
 - **Роли (личный, рабочий, клиенты):** можно добавить в профиль пользователя поле `role` или `context_type` и подставлять его в системный промпт в API.

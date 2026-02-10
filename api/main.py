@@ -2466,6 +2466,24 @@ async def get_chat_history(x_user_id: str = Header(...), limit: int = Query(50, 
     return {"history": history}
 
 
+@app.get("/api/agent_state")
+async def get_agent_state(x_user_id: str = Header(...)):
+    """
+    Диагностика: получить текущее состояние агента (AgentState) для пользователя.
+
+    Используется для отладки: посмотреть persona, active_goals, memory_summary, recent_actions.
+    """
+    uid = str(x_user_id).strip()
+    state = await agent_core.load_state(uid)
+    return {
+        "user_id": state.user_id,
+        "persona": state.persona,
+        "active_goals": state.active_goals,
+        "recent_actions": state.recent_actions,
+        "memory_summary": state.memory_summary,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

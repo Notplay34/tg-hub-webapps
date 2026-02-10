@@ -127,13 +127,19 @@ class AgentCore:
 
         Возвращает один из:
         - direct_action
+        - finance_question
+        - tasks_question
+        - planning
         - question
         - smalltalk
-        - planning
         """
         msg = (message or "").strip().lower()
         if direct_command:
             return "direct_action"
+        if any(word in msg for word in ("баланс", "расход", "расходы", "доход", "доходы", "деньги", "финанс")):
+            return "finance_question"
+        if any(word in msg for word in ("задач", "список дел", "дела", "план на", "приорит")):
+            return "tasks_question"
         if "план" in msg or "список дел" in msg or "приорит" in msg:
             return "planning"
         if "?" in msg or msg.startswith(("почему", "как ", "что ", "зачем")):
