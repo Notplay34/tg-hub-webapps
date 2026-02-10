@@ -13,9 +13,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from config import API_BASE_URL, BOT_TOKEN, WEBAPP_HUB_URL
+from storage.bootstrap import get_tasks_repo
 from tg_hub_bot.handlers.start import register_start_handler
 from tg_hub_bot.handlers.ai_chat import register_ai_chat_handler
-from tg_hub_bot.repositories.tasks import SqliteTaskRepository
 from tg_hub_bot.scheduler import SchedulerService
 from tg_hub_bot.services.ai import ApiAiService
 from tg_hub_bot.services.reminders import RemindersService
@@ -24,14 +24,12 @@ from tg_hub_bot.services.reminders import RemindersService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DATABASE = "data/hub.db"
-
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
-tasks_repo = SqliteTaskRepository(DATABASE)
+tasks_repo = get_tasks_repo()
 reminders_service = RemindersService(bot, tasks_repo)
 scheduler_service = SchedulerService(reminders_service)
 ai_service = ApiAiService(API_BASE_URL)
