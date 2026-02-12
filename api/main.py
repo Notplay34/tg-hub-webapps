@@ -3,7 +3,7 @@ API для TG Hub — хранение данных на сервере.
 """
 
 import os
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import Depends, FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -42,6 +42,11 @@ except ImportError:  # fallback для запуска из каталога api
     from repositories import chat_history as chat_repo  # type: ignore[no-redef]
     from agent_core import AgentCore  # type: ignore[no-redef]
 
+try:
+    from api.telegram_auth import get_user_id_from_init_data
+except ImportError:
+    from telegram_auth import get_user_id_from_init_data  # type: ignore[no-redef]
+
 app = FastAPI(title="TG Hub API")
 
 app.add_middleware(
@@ -53,9 +58,22 @@ app.add_middleware(
 )
 
 DATABASE = "data/hub.db"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 # Agent Core — единый экземпляр для работы с состоянием агента
 agent_core = AgentCore(DATABASE)
+
+
+def resolve_user_id(
+    x_user_id: str = Header("", alias="X-User-Id"),
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+) -> str:
+    """Если initData валиден — берём user_id из него (работает когда initDataUnsafe пуст на мобилке)."""
+    if x_telegram_init_data and BOT_TOKEN:
+        uid = get_user_id_from_init_data(x_telegram_init_data, BOT_TOKEN)
+        if uid:
+            return uid
+    return str(x_user_id).strip() if x_user_id else "anonymous"
 
 
 async def extract_person_with_ai(text: str):
@@ -117,7 +135,8 @@ async def extract_command_with_ai(message: str):
 - income — учёт дохода (нужны: amount; опционально category)
 - goal — финансовая цель (нужны: title, target_amount — число)
 - contact — добавить контакта/карточку человека (нужны: fio; опционально relation, birth_date YYYY-MM-DD)
-- note — заметка в базу знаний (нужны: content)
+- project — создать проект (нужны: title; опционально description)
+- project_note — заметка в проект (нужны: project — название проекта, text — текст заметки)
 
 Суммы всегда числами: 200000 для "200 тысяч", 500 для "500 руб".
 Если это вопрос, приветствие, непонятно или не подходит ни один тип — верни intent: "none".
@@ -199,12 +218,19 @@ async def extract_command_with_ai(message: str):
                     out[key] = data[key] if isinstance(data[key], str) else str(data[key])
             return out
 
-        if intent == "note":
-            content = (data.get("content") or "").strip()[:500]
-            if not content:
+        if intent == "project":
+            title = (data.get("title") or "").strip()[:200]
+            if not title:
                 return None
-            title = content[:150] + ("..." if len(content) > 150 else "")
-            return {"action": "create_knowledge", "title": title, "content": content}
+            description = (data.get("description") or "").strip()[:500]
+            return {"action": "create_project", "title": title, "description": description}
+
+        if intent == "project_note":
+            project = (data.get("project") or "").strip()
+            text = (data.get("text") or "").strip()[:500]
+            if not text:
+                return None
+            return {"action": "add_project_note", "project": project, "text": text}
 
         return None
     except (json.JSONDecodeError, AiNotConfiguredError, Exception) as e:
@@ -221,6 +247,7 @@ class Task(BaseModel):
     priority: str = "medium"
     done: bool = False
     person_id: Optional[int] = None
+    project_id: Optional[int] = None
     reminder_enabled: bool = False
     reminder_time: Optional[str] = None
     recurrence_type: str = "none"  # none, daily, weekly, monthly
@@ -233,6 +260,7 @@ class TaskUpdate(BaseModel):
     priority: Optional[str] = None
     done: Optional[bool] = None
     person_id: Optional[int] = None
+    project_id: Optional[int] = None
     reminder_enabled: Optional[bool] = None
     reminder_time: Optional[str] = None
     recurrence_type: Optional[str] = None
@@ -256,11 +284,22 @@ class Note(BaseModel):
     text: str
 
 
-class Knowledge(BaseModel):
+class Project(BaseModel):
     title: str
-    content: Optional[str] = ""
-    tags: Optional[List[str]] = []
-    person_id: Optional[int] = None
+    description: Optional[str] = ""
+    status: Optional[str] = "active"
+    deadline: Optional[str] = None
+    budget: Optional[float] = None
+    revenue_goal: Optional[float] = None
+
+
+class ProjectNote(BaseModel):
+    text: str
+
+
+class ProjectMember(BaseModel):
+    person_id: int
+    role: Optional[str] = ""
 
 
 class ChatMessage(BaseModel):
@@ -373,14 +412,38 @@ async def init_db():
         """)
         
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS knowledge (
+            CREATE TABLE IF NOT EXISTS projects (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
                 title TEXT NOT NULL,
-                content TEXT,
-                tags TEXT DEFAULT '[]',
-                person_id INTEGER,
+                description TEXT,
+                status TEXT DEFAULT 'active',
+                deadline DATE,
+                budget REAL,
+                revenue_goal REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS project_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+        """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS project_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                person_id INTEGER NOT NULL,
+                role TEXT,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE,
+                UNIQUE(project_id, person_id)
             )
         """)
         
@@ -466,12 +529,14 @@ async def init_db():
             msg = str(e).lower()
             if "duplicate column name" not in msg:
                 print(f"[DB MIGRATION] tasks.person_id failed: {e}")
+        
+        # Миграция: добавляем project_id в tasks
         try:
-            await db.execute("ALTER TABLE knowledge ADD COLUMN person_id INTEGER")
+            await db.execute("ALTER TABLE tasks ADD COLUMN project_id INTEGER")
         except Exception as e:
             msg = str(e).lower()
             if "duplicate column name" not in msg:
-                print(f"[DB MIGRATION] knowledge.person_id failed: {e}")
+                print(f"[DB MIGRATION] tasks.project_id failed: {e}")
         
         await db.commit()
 
@@ -523,7 +588,7 @@ async def log_timeline(db, user_id: str, action_type: str, entity_type: str, ent
 # === ЗАДАЧИ ===
 
 @app.get("/api/tasks")
-async def get_tasks(x_user_id: str = Header(...)):
+async def get_tasks(x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -533,9 +598,20 @@ async def get_tasks(x_user_id: str = Header(...)):
         return [dict(row) for row in await cursor.fetchall()]
 
 
+def _strip_folder_prefix(title: str) -> str:
+    """Убирает префикс [Папка] из названия — только простые задачи."""
+    if not title:
+        return title
+    m = re.match(r"^\[[^\]]+\]\s*(.*)$", title.strip())
+    return m.group(1).strip() if m else title.strip()
+
+
 @app.post("/api/tasks")
-async def create_task(task: Task, x_user_id: str = Header(...)):
+async def create_task(task: Task, x_user_id: str = Depends(resolve_user_id)):
     try:
+        title = _strip_folder_prefix(task.title or "")
+        if not title:
+            raise HTTPException(status_code=400, detail="Название задачи не может быть пустым.")
         # Валидация: повторяющиеся задачи без дедлайна запрещаем
         if task.recurrence_type and task.recurrence_type != "none" and not task.deadline:
             raise HTTPException(
@@ -544,23 +620,24 @@ async def create_task(task: Task, x_user_id: str = Header(...)):
             )
         async with aiosqlite.connect(DATABASE) as db:
             cursor = await db.execute(
-                """INSERT INTO tasks (user_id, title, description, deadline, priority, done, person_id, reminder_enabled, reminder_time, recurrence_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO tasks (user_id, title, description, deadline, priority, done, person_id, project_id, reminder_enabled, reminder_time, recurrence_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     x_user_id,
-                    task.title,
+                    title,
                     task.description,
                     task.deadline,
                     task.priority,
                     int(task.done),
                     task.person_id,
+                    task.project_id,
                     int(task.reminder_enabled),
                     task.reminder_time,
                     task.recurrence_type or "none",
                 )
             )
             task_id = cursor.lastrowid
-            await log_timeline(db, x_user_id, "created", "task", task_id, task.title)
+            await log_timeline(db, x_user_id, "created", "task", task_id, title)
             await db.commit()
             return {"id": task_id}
     except Exception as e:
@@ -568,7 +645,7 @@ async def create_task(task: Task, x_user_id: str = Header(...)):
 
 
 @app.patch("/api/tasks/{task_id}")
-async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(...)):
+async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
             """
@@ -616,6 +693,9 @@ async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(..
                 if value and not old_done:
                     action_type = "completed"
             elif field == "title":
+                value = _strip_folder_prefix(str(value or ""))
+                if not value:
+                    raise HTTPException(status_code=400, detail="Название задачи не может быть пустым.")
                 updates.append("title = ?")
                 values.append(value)
                 cur_title = value
@@ -635,6 +715,9 @@ async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(..
                 updates.append("person_id = ?")
                 values.append(value)
                 cur_person_id = value
+            elif field == "project_id":
+                updates.append("project_id = ?")
+                values.append(value)
             elif field == "reminder_enabled":
                 updates.append("reminder_enabled = ?")
                 values.append(int(bool(value)))
@@ -709,7 +792,7 @@ async def update_task(task_id: int, task: TaskUpdate, x_user_id: str = Header(..
 
 
 @app.delete("/api/tasks/{task_id}")
-async def delete_task(task_id: int, x_user_id: str = Header(...)):
+async def delete_task(task_id: int, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("SELECT title FROM tasks WHERE id = ? AND user_id = ?", (task_id, x_user_id))
         row = await cursor.fetchone()
@@ -723,7 +806,7 @@ async def delete_task(task_id: int, x_user_id: str = Header(...)):
 # === ЛЮДИ ===
 
 @app.get("/api/people")
-async def get_people(x_user_id: str = Header(...)):
+async def get_people(x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM people WHERE user_id = ? ORDER BY created_at DESC", (x_user_id,))
@@ -742,7 +825,7 @@ async def get_people(x_user_id: str = Header(...)):
 
 
 @app.post("/api/people")
-async def create_person(person: Person, x_user_id: str = Header(...)):
+async def create_person(person: Person, x_user_id: str = Depends(resolve_user_id)):
     data = person.model_dump(exclude={'fio'})
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
@@ -756,7 +839,7 @@ async def create_person(person: Person, x_user_id: str = Header(...)):
 
 
 @app.patch("/api/people/{person_id}")
-async def update_person(person_id: int, person: Person, x_user_id: str = Header(...)):
+async def update_person(person_id: int, person: Person, x_user_id: str = Depends(resolve_user_id)):
     data = person.model_dump(exclude={'fio'})
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("SELECT id FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
@@ -773,7 +856,7 @@ async def update_person(person_id: int, person: Person, x_user_id: str = Header(
 
 
 @app.delete("/api/people/{person_id}")
-async def delete_person(person_id: int, x_user_id: str = Header(...)):
+async def delete_person(person_id: int, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("SELECT fio FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
         row = await cursor.fetchone()
@@ -785,7 +868,7 @@ async def delete_person(person_id: int, x_user_id: str = Header(...)):
 
 
 @app.post("/api/people/{person_id}/notes")
-async def add_note(person_id: int, note: Note, x_user_id: str = Header(...)):
+async def add_note(person_id: int, note: Note, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("SELECT fio FROM people WHERE id = ? AND user_id = ?", (person_id, x_user_id))
         row = await cursor.fetchone()
@@ -800,33 +883,182 @@ async def add_note(person_id: int, note: Note, x_user_id: str = Header(...)):
 
 
 @app.delete("/api/people/{person_id}/notes/{note_id}")
-async def delete_note(person_id: int, note_id: int, x_user_id: str = Header(...)):
+async def delete_note(person_id: int, note_id: int, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute("DELETE FROM person_notes WHERE id = ? AND person_id = ?", (note_id, person_id))
         await db.commit()
         return {"ok": True}
 
 
-# === БАЗА ЗНАНИЙ ===
+# === ПРОЕКТЫ ===
 
-@app.get("/api/knowledge")
-async def get_knowledge(x_user_id: str = Header(...)):
+@app.get("/api/projects")
+async def get_projects(x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM knowledge WHERE user_id = ? ORDER BY created_at DESC", (x_user_id,))
-        rows = await cursor.fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            item['tags'] = json.loads(item['tags'])
-            result.append(item)
-        return result
+        cursor = await db.execute(
+            "SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC",
+            (x_user_id,)
+        )
+        projects = []
+        for row in await cursor.fetchall():
+            pr = dict(row)
+            # Подсчёт задач
+            tc = await db.execute(
+                "SELECT COUNT(*) as total, SUM(CASE WHEN done = 1 THEN 1 ELSE 0 END) as done_count FROM tasks WHERE project_id = ? AND user_id = ?",
+                (pr["id"], x_user_id)
+            )
+            tr = await tc.fetchone()
+            pr["tasks_count"] = tr["total"] if tr else 0
+            pr["tasks_done"] = tr["done_count"] if tr else 0
+            # Участники
+            mc = await db.execute(
+                "SELECT pm.id, pm.person_id, pm.role FROM project_members pm WHERE pm.project_id = ?",
+                (pr["id"],)
+            )
+            pr["members"] = [dict(m) for m in await mc.fetchall()]
+            pr["members_count"] = len(pr["members"])
+            projects.append(pr)
+        return projects
+
+
+@app.post("/api/projects")
+async def create_project(project: Project, x_user_id: str = Depends(resolve_user_id)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute(
+            """INSERT INTO projects (user_id, title, description, status, deadline, budget, revenue_goal)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (x_user_id, project.title, project.description, project.status or "active",
+             project.deadline, project.budget, project.revenue_goal)
+        )
+        project_id = cursor.lastrowid
+        await log_timeline(db, x_user_id, "created", "project", project_id, project.title)
+        await db.commit()
+        return {"id": project_id}
+
+
+@app.patch("/api/projects/{project_id}")
+async def update_project(project_id: int, project: Project, x_user_id: str = Depends(resolve_user_id)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT id FROM projects WHERE id = ? AND user_id = ?", (project_id, x_user_id))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404)
+        await db.execute(
+            """UPDATE projects SET title = ?, description = ?, status = ?, deadline = ?, budget = ?, revenue_goal = ?
+               WHERE id = ?""",
+            (project.title, project.description, project.status, project.deadline,
+             project.budget, project.revenue_goal, project_id)
+        )
+        await log_timeline(db, x_user_id, "updated", "project", project_id, project.title)
+        await db.commit()
+        return {"ok": True}
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: int, x_user_id: str = Depends(resolve_user_id)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT title FROM projects WHERE id = ? AND user_id = ?", (project_id, x_user_id))
+        row = await cursor.fetchone()
+        if row:
+            await log_timeline(db, x_user_id, "deleted", "project", project_id, row[0])
+        # Открепляем задачи от проекта
+        await db.execute("UPDATE tasks SET project_id = NULL WHERE project_id = ?", (project_id,))
+        await db.execute("DELETE FROM projects WHERE id = ? AND user_id = ?", (project_id, x_user_id))
+        await db.commit()
+        return {"ok": True}
+
+
+@app.get("/api/projects/{project_id}/summary")
+async def get_project_summary(project_id: int, x_user_id: str = Depends(resolve_user_id)):
+    async with aiosqlite.connect(DATABASE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT id FROM projects WHERE id = ? AND user_id = ?", (project_id, x_user_id))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404)
+        
+        # Задачи проекта
+        tc = await db.execute(
+            "SELECT * FROM tasks WHERE project_id = ? AND user_id = ? ORDER BY done ASC, deadline ASC",
+            (project_id, x_user_id)
+        )
+        tasks = [dict(t) for t in await tc.fetchall()]
+        tasks_total = len(tasks)
+        tasks_done = sum(1 for t in tasks if t.get("done"))
+        
+        # Заметки
+        nc = await db.execute(
+            "SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at DESC",
+            (project_id,)
+        )
+        notes = [dict(n) for n in await nc.fetchall()]
+        
+        # Участники
+        mc = await db.execute(
+            "SELECT pm.id, pm.person_id, pm.role FROM project_members pm WHERE pm.project_id = ?",
+            (project_id,)
+        )
+        members = [dict(m) for m in await mc.fetchall()]
+        
+        return {
+            "tasks": tasks,
+            "tasks_total": tasks_total,
+            "tasks_done": tasks_done,
+            "notes": notes,
+            "members": members,
+        }
+
+
+@app.post("/api/projects/{project_id}/notes")
+async def add_project_note(project_id: int, note: ProjectNote, x_user_id: str = Depends(resolve_user_id)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT id FROM projects WHERE id = ? AND user_id = ?", (project_id, x_user_id))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404)
+        await db.execute(
+            "INSERT INTO project_notes (project_id, text) VALUES (?, ?)",
+            (project_id, note.text)
+        )
+        await db.commit()
+        return {"ok": True}
+
+
+@app.delete("/api/projects/{project_id}/notes/{note_id}")
+async def delete_project_note(project_id: int, note_id: int, x_user_id: str = Depends(resolve_user_id)):
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("DELETE FROM project_notes WHERE id = ? AND project_id = ?", (note_id, project_id))
+        await db.commit()
+        return {"ok": True}
+
+
+@app.post("/api/projects/{project_id}/members")
+async def add_project_member(project_id: int, member: ProjectMember, x_user_id: str = Depends(resolve_user_id)):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT id FROM projects WHERE id = ? AND user_id = ?", (project_id, x_user_id))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404)
+        try:
+            await db.execute(
+                "INSERT INTO project_members (project_id, person_id, role) VALUES (?, ?, ?)",
+                (project_id, member.person_id, member.role)
+            )
+            await db.commit()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Участник уже добавлен")
+        return {"ok": True}
+
+
+@app.delete("/api/projects/{project_id}/members/{member_id}")
+async def remove_project_member(project_id: int, member_id: int, x_user_id: str = Depends(resolve_user_id)):
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("DELETE FROM project_members WHERE id = ? AND project_id = ?", (member_id, project_id))
+        await db.commit()
+        return {"ok": True}
 
 
 # === ФИНАНСЫ ===
 
 @app.post("/api/finance/transactions")
-async def create_transaction(tx: FinanceTransaction, x_user_id: str = Header(...)):
+async def create_transaction(tx: FinanceTransaction, x_user_id: str = Depends(resolve_user_id)):
     if tx.type not in ("income", "expense", "savings"):
         raise HTTPException(status_code=400, detail="type должен быть 'income', 'expense' или 'savings'")
     if not tx.date:
@@ -854,7 +1086,7 @@ async def create_transaction(tx: FinanceTransaction, x_user_id: str = Header(...
 
 @app.get("/api/finance/transactions")
 async def list_transactions(
-    x_user_id: str = Header(...),
+    x_user_id: str = Depends(resolve_user_id),
     month: Optional[str] = Query(None, description="YYYY-MM"),
 ):
     """Список транзакций за месяц (по умолчанию — текущий)."""
@@ -887,7 +1119,7 @@ async def list_transactions(
 
 
 @app.patch("/api/finance/transactions/{tx_id}")
-async def update_transaction(tx_id: int, body: FinanceTransactionUpdate, x_user_id: str = Header(...)):
+async def update_transaction(tx_id: int, body: FinanceTransactionUpdate, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
             "SELECT id FROM finance_transactions WHERE id = ? AND user_id = ?", (tx_id, x_user_id)
@@ -929,7 +1161,7 @@ async def update_transaction(tx_id: int, body: FinanceTransactionUpdate, x_user_
 
 
 @app.delete("/api/finance/transactions/{tx_id}")
-async def delete_transaction(tx_id: int, x_user_id: str = Header(...)):
+async def delete_transaction(tx_id: int, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
             "SELECT id FROM finance_transactions WHERE id = ? AND user_id = ?", (tx_id, x_user_id)
@@ -942,7 +1174,7 @@ async def delete_transaction(tx_id: int, x_user_id: str = Header(...)):
 
 
 @app.post("/api/finance/goals")
-async def create_goal(goal: FinanceGoal, x_user_id: str = Header(...)):
+async def create_goal(goal: FinanceGoal, x_user_id: str = Depends(resolve_user_id)):
     if goal.target_amount <= 0:
         raise HTTPException(status_code=400, detail="target_amount должен быть > 0")
     async with aiosqlite.connect(DATABASE) as db:
@@ -966,7 +1198,7 @@ async def create_goal(goal: FinanceGoal, x_user_id: str = Header(...)):
 
 
 @app.get("/api/finance/goals")
-async def list_goals(x_user_id: str = Header(...)):
+async def list_goals(x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -977,7 +1209,7 @@ async def list_goals(x_user_id: str = Header(...)):
 
 
 @app.patch("/api/finance/goals/{goal_id}")
-async def update_goal(goal_id: int, body: FinanceGoalUpdate, x_user_id: str = Header(...)):
+async def update_goal(goal_id: int, body: FinanceGoalUpdate, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
             "SELECT id FROM finance_goals WHERE id = ? AND user_id = ?", (goal_id, x_user_id)
@@ -1016,7 +1248,7 @@ async def update_goal(goal_id: int, body: FinanceGoalUpdate, x_user_id: str = He
 
 
 @app.delete("/api/finance/goals/{goal_id}")
-async def delete_goal(goal_id: int, x_user_id: str = Header(...)):
+async def delete_goal(goal_id: int, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
             "SELECT id FROM finance_goals WHERE id = ? AND user_id = ?", (goal_id, x_user_id)
@@ -1029,7 +1261,7 @@ async def delete_goal(goal_id: int, x_user_id: str = Header(...)):
 
 
 @app.get("/api/finance/limits")
-async def list_limits(x_user_id: str = Header(...)):
+async def list_limits(x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -1040,7 +1272,7 @@ async def list_limits(x_user_id: str = Header(...)):
 
 
 @app.post("/api/finance/limits")
-async def create_limit(limit: FinanceLimit, x_user_id: str = Header(...)):
+async def create_limit(limit: FinanceLimit, x_user_id: str = Depends(resolve_user_id)):
     if limit.amount <= 0:
         raise HTTPException(status_code=400, detail="amount должен быть > 0")
     async with aiosqlite.connect(DATABASE) as db:
@@ -1056,7 +1288,7 @@ async def create_limit(limit: FinanceLimit, x_user_id: str = Header(...)):
 
 
 @app.patch("/api/finance/limits/{limit_id}")
-async def update_limit(limit_id: int, limit: FinanceLimit, x_user_id: str = Header(...)):
+async def update_limit(limit_id: int, limit: FinanceLimit, x_user_id: str = Depends(resolve_user_id)):
     if limit.amount <= 0:
         raise HTTPException(status_code=400, detail="amount должен быть > 0")
     async with aiosqlite.connect(DATABASE) as db:
@@ -1074,7 +1306,7 @@ async def update_limit(limit_id: int, limit: FinanceLimit, x_user_id: str = Head
 
 
 @app.delete("/api/finance/limits/{limit_id}")
-async def delete_limit(limit_id: int, x_user_id: str = Header(...)):
+async def delete_limit(limit_id: int, x_user_id: str = Depends(resolve_user_id)):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute(
             "SELECT id FROM finance_limits WHERE id = ? AND user_id = ?", (limit_id, x_user_id)
@@ -1088,7 +1320,7 @@ async def delete_limit(limit_id: int, x_user_id: str = Header(...)):
 
 @app.get("/api/finance/summary")
 async def finance_summary(
-    x_user_id: str = Header(...),
+    x_user_id: str = Depends(resolve_user_id),
     month: Optional[str] = Query(None, description="YYYY-MM"),
 ):
     """Сводка по финансам за месяц."""
@@ -1190,51 +1422,10 @@ async def finance_summary(
     }
 
 
-@app.post("/api/knowledge")
-async def create_knowledge(item: Knowledge, x_user_id: str = Header(...)):
-    async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            "INSERT INTO knowledge (user_id, title, content, tags, person_id) VALUES (?, ?, ?, ?, ?)",
-            (x_user_id, item.title, item.content, json.dumps(item.tags, ensure_ascii=False), item.person_id)
-        )
-        item_id = cursor.lastrowid
-        await log_timeline(db, x_user_id, "created", "knowledge", item_id, item.title)
-        await db.commit()
-        return {"id": item_id}
-
-
-@app.patch("/api/knowledge/{item_id}")
-async def update_knowledge(item_id: int, item: Knowledge, x_user_id: str = Header(...)):
-    async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT id FROM knowledge WHERE id = ? AND user_id = ?", (item_id, x_user_id))
-        if not await cursor.fetchone():
-            raise HTTPException(status_code=404)
-        
-        await db.execute(
-            "UPDATE knowledge SET title = ?, content = ?, tags = ?, person_id = ? WHERE id = ?",
-            (item.title, item.content, json.dumps(item.tags, ensure_ascii=False), item.person_id, item_id)
-        )
-        await log_timeline(db, x_user_id, "updated", "knowledge", item_id, item.title)
-        await db.commit()
-        return {"ok": True}
-
-
-@app.delete("/api/knowledge/{item_id}")
-async def delete_knowledge(item_id: int, x_user_id: str = Header(...)):
-    async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT title FROM knowledge WHERE id = ? AND user_id = ?", (item_id, x_user_id))
-        row = await cursor.fetchone()
-        if row:
-            await log_timeline(db, x_user_id, "deleted", "knowledge", item_id, row[0])
-        await db.execute("DELETE FROM knowledge WHERE id = ? AND user_id = ?", (item_id, x_user_id))
-        await db.commit()
-        return {"ok": True}
-
-
 # === ИИ АССИСТЕНТ ===
 
 @app.get("/api/timeline")
-async def get_timeline(x_user_id: str = Header(...), limit: int = 50):
+async def get_timeline(x_user_id: str = Depends(resolve_user_id), limit: int = 50):
     """Получить timeline событий."""
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
@@ -1571,21 +1762,32 @@ def parse_user_command(message: str, user_id: str):
                 continue
             return {"action": "add_finance_goal", "title": title[:200], "target_amount": target}
     
-    # Заметка в базу знаний
-    note_patterns = [
-        r'добавь\s+заметку\s+(.+)',
-        r'добавь\s+в\s+базу\s+(?:знаний\s+)?(.+)',
-        r'запиши\s+в\s+базу\s+(?:знаний\s+)?(.+)',
-        r'добавь\s+(?:в\s+)?базу\s+знаний\s+(.+)',
+    # Создать проект
+    project_create_patterns = [
+        r'создай\s+проект\s+(.+)',
+        r'новый\s+проект\s+(.+)',
+        r'добавь\s+проект\s+(.+)',
     ]
-    for pattern in note_patterns:
+    for pattern in project_create_patterns:
         m = re.search(pattern, msg_lower)
         if m:
-            text = m.group(1).strip()
-            if not text or len(text) > 500:
-                continue
-            title = text[:150] + ("..." if len(text) > 150 else "")
-            return {"action": "create_knowledge", "title": title, "content": text}
+            title = m.group(1).strip()
+            if title and len(title) <= 200:
+                return {"action": "create_project", "title": title}
+    
+    # Записать в проект (заметка)
+    project_note_patterns = [
+        r'запиши\s+в\s+проект\s+(.+?):\s*(.+)',
+        r'добавь\s+в\s+проект\s+(.+?):\s*(.+)',
+        r'заметка\s+в\s+проект\s+(.+?):\s*(.+)',
+    ]
+    for pattern in project_note_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            project_name = m.group(1).strip()
+            text = m.group(2).strip()
+            if project_name and text:
+                return {"action": "add_project_note", "project": project_name, "text": text}
     
     # Создать контакт/карточку (явные фразы)
     person_patterns = [
@@ -1800,6 +2002,10 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
         async with aiosqlite.connect(DATABASE) as db:
             if action_type == "create_task":
                 title = action.get("title", "").strip()
+                # Убираем префикс [Папка]/[Проект] — только простые задачи
+                m = re.match(r'^\[[^\]]+\]\s*(.*)$', title)
+                if m:
+                    title = m.group(1).strip()
                 if not title:
                     return "❌ Не указано название задачи"
                 
@@ -1916,18 +2122,6 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
                     return f"✅ Контакт обновлён: {fio} ({summary})"
                 return f"✅ Контакт обновлён: {fio}"
             
-            elif action_type == "create_knowledge":
-                title = action.get("title", "").strip()
-                if not title:
-                    return "❌ Не указан заголовок"
-                
-                await db.execute(
-                    "INSERT INTO knowledge (user_id, title, content, tags) VALUES (?, ?, ?, ?)",
-                    (user_id, title, action.get("content", ""), json.dumps(action.get("tags", []), ensure_ascii=False))
-                )
-                await db.commit()
-                return f"✅ Запись добавлена: {title}"
-            
             elif action_type == "add_finance_transaction":
                 tx_type = action.get("type", "expense")
                 amount = action.get("amount")
@@ -1985,6 +2179,53 @@ async def execute_ai_action(action: dict, user_id: str) -> str:
                         return f"✅ Задача выполнена: {task[1]}"
                 
                 return "❌ Задача не найдена"
+            
+            elif action_type == "create_project":
+                title = (action.get("title") or "").strip()
+                if not title:
+                    return "❌ Укажи название проекта"
+                description = (action.get("description") or "").strip()
+                budget = action.get("budget")
+                revenue_goal = action.get("revenue_goal")
+                deadline = action.get("deadline")
+                await db.execute(
+                    """INSERT INTO projects (user_id, title, description, status, deadline, budget, revenue_goal)
+                       VALUES (?, ?, ?, 'active', ?, ?, ?)""",
+                    (user_id, title[:200], description[:500] if description else "", deadline, budget, revenue_goal)
+                )
+                await db.commit()
+                return f"✅ Проект создан: {title}"
+            
+            elif action_type == "add_project_note":
+                project_title = (action.get("project") or "").strip().lower()
+                text = (action.get("text") or "").strip()
+                if not text:
+                    return "❌ Укажи текст заметки"
+                
+                cursor = await db.execute(
+                    "SELECT id, title FROM projects WHERE user_id = ? AND status != 'done'",
+                    (user_id,)
+                )
+                projects = await cursor.fetchall()
+                
+                for pr in projects:
+                    if project_title in pr[1].lower():
+                        await db.execute(
+                            "INSERT INTO project_notes (project_id, text) VALUES (?, ?)",
+                            (pr[0], text)
+                        )
+                        await db.commit()
+                        return f"✅ Заметка добавлена в проект «{pr[1]}»"
+                
+                if len(projects) == 1:
+                    await db.execute(
+                        "INSERT INTO project_notes (project_id, text) VALUES (?, ?)",
+                        (projects[0][0], text)
+                    )
+                    await db.commit()
+                    return f"✅ Заметка добавлена в проект «{projects[0][1]}»"
+                
+                return "❌ Проект не найден. Уточни название проекта."
         
         return "❌ Неизвестное действие"
     
@@ -2060,7 +2301,7 @@ async def maybe_summarize_chat(user_id: str):
 
 
 @app.post("/api/chat")
-async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
+async def chat(msg: ChatMessage, x_user_id: str = Depends(resolve_user_id)):
     """Чат с ИИ-ассистентом, который знает все данные пользователя."""
     # Единый формат user_id для БД (избегаем расхождений Telegram id как число/строка)
     uid = str(x_user_id).strip() if x_user_id else ""
@@ -2169,8 +2410,21 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         active_tasks = [dict(r) for r in await cursor.fetchall()]
         tasks_today = [t for t in active_tasks if t.get("deadline") == today_iso]
         tasks_overdue = [dict(t, **{"_overdue": True}) for t in active_tasks if t.get("deadline") and t["deadline"] < today_iso]
-        # Для промпта убираем служебный флаг, оставляем только нужные поля
-        _strip = lambda lst: [{"title": x.get("title"), "deadline": x.get("deadline"), "priority": x.get("priority")} for x in lst]
+        # Дедупликация по (title, deadline) — убираем дубли из БД/повторов
+        def _dedupe(lst):
+            seen = set()
+            out = []
+            for x in lst:
+                key = (x.get("title") or "", x.get("deadline") or "")
+                if key not in seen:
+                    seen.add(key)
+                    out.append(x)
+            return out
+        tasks_today = _dedupe(tasks_today)
+        tasks_overdue = _dedupe(tasks_overdue)
+        # Для промпта убираем служебный флаг и префикс [Папка], оставляем только нужные поля
+        def _strip(lst):
+            return [{"title": _strip_folder_prefix(x.get("title") or ""), "deadline": x.get("deadline"), "priority": x.get("priority")} for x in lst]
         tasks_today_short = _strip(tasks_today)
         tasks_overdue_short = _strip(tasks_overdue)
         logger.info("Chat context user_id=%s tasks_today=%d tasks_overdue=%d", uid, len(tasks_today), len(tasks_overdue))
@@ -2219,17 +2473,23 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
             p.update(json.loads(row["data"]))
             people.append(p)
         
-        # Знания
+        # Проекты (активные)
         cursor = await db.execute(
-            "SELECT title, content, tags FROM knowledge WHERE user_id = ?",
+            "SELECT id, title, status, deadline, budget, revenue_goal FROM projects WHERE user_id = ? AND status != 'done'",
             (uid,)
         )
-        knowledge = []
+        projects_ctx = []
         for row in await cursor.fetchall():
-            k = dict(row)
-            k["tags"] = json.loads(k["tags"])
-            knowledge.append(k)
-
+            pr = dict(row)
+            tc = await db.execute(
+                "SELECT COUNT(*) as total, SUM(CASE WHEN done = 1 THEN 1 ELSE 0 END) as done_count FROM tasks WHERE project_id = ?",
+                (pr["id"],)
+            )
+            tr = await tc.fetchone()
+            pr["tasks_total"] = tr["total"] if tr else 0
+            pr["tasks_done"] = tr["done_count"] if tr else 0
+            projects_ctx.append(pr)
+        
         # Финансы: сводка за текущий месяц + последние операции и цели
         start_month = today.replace(day=1)
         if start_month.month == 12:
@@ -2368,7 +2628,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
         })
     
     # Формируем системный промпт
-    system_prompt = f"""Ты — ИИ-ассистент YouHub: задачи, контакты, база знаний и финансы в одном месте. Работаешь как агент: даёшь короткие ответы и подсказки по данным пользователя.
+    system_prompt = f"""Ты — ИИ-ассистент YouHub: задачи, контакты, проекты и финансы в одном месте. Работаешь как агент: даёшь короткие ответы и подсказки по данным пользователя.
 
 ⏰ Сейчас: {today_str} ({weekday}), {now.strftime("%H:%M")}
 
@@ -2376,7 +2636,7 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 ⚠️ Актуальны ТОЛЬКО данные в этом блоке. В истории диалога могли упоминаться старые цели/задачи/операции — пользователь мог их удалить. Не пересказывай цели или факты из истории. Если в блоке написано «Цели: нет» — отвечай, что целей нет; не упоминай цели из прошлых сообщений.
 • Задачи из БД: на сегодня (дедлайн сегодня) — {json.dumps(tasks_today_short, ensure_ascii=False) if tasks_today_short else "нет"}; просроченные (дедлайн прошёл) — {json.dumps(tasks_overdue_short, ensure_ascii=False) if tasks_overdue_short else "нет"}. Всего активных (не выполненных): {total_tasks}. Готовые не показывай.
 • Контакты ({len(people)}): {json.dumps(people, ensure_ascii=False) if people else "нет"}
-• Знания ({len(knowledge)}): {json.dumps(knowledge, ensure_ascii=False) if knowledge else "нет"}
+• Проекты ({len(projects_ctx)}): {json.dumps(projects_ctx, ensure_ascii=False) if projects_ctx else "нет"}
 • Финансы (текущий месяц): доход {fin_income}, расход {fin_expense}, баланс {fin_balance}
 • Последние операции: {json.dumps(fin_last_ops, ensure_ascii=False) if fin_last_ops else "нет"}
 • Цели: {json.dumps(fin_goals, ensure_ascii=False) if fin_goals else "нет"}
@@ -2384,12 +2644,12 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 • Лимиты по категориям (потрачено / лимит): {json.dumps(limits_summary, ensure_ascii=False) if limits_summary else "нет"}
 
 🔧 КОМАНДЫ (система выполняет по точной фразе; не путай тип записи):
-- Задача: "создай задачу купить молоко на завтра", "выполнено купить молоко"
+- Задача: "создай задачу купить молоко на завтра", "выполнено купить молоко". Названия задач — только текст, без префиксов [Проект], [Папка] и т.п.
 - Контакт (карточка человека): "добавь контакт Иванов Иван, сын, 01.01.1990" или "добавь контакт ФИО, роль, черты"
+- Проект: "создай проект Ремонт квартиры", "запиши в проект Ремонт: договорились с подрядчиком"
 - Расход: "добавь расход 500 на еду", "расход 300 транспорт"
 - Доход: "добавь доход 3000 зарплата"
 - Цель (финансовая): "добавь цель отпуск 200000" или "добавь цель название сумма"
-- Заметка: "добавь заметку про встречу с Иваном"
 Если пользователь хочет добавить цель — подскажи фразу с словом "цель" и суммой. Если контакт — фразу с "добавь контакт" и ФИО. Не подставляй одно вместо другого.
 
 🎯 Формат ответа:
@@ -2446,14 +2706,14 @@ async def chat(msg: ChatMessage, x_user_id: str = Header(...)):
 
 
 @app.delete("/api/chat/history")
-async def clear_chat_history(x_user_id: str = Header(...)):
+async def clear_chat_history(x_user_id: str = Depends(resolve_user_id)):
     """Очистить историю чата."""
     await chat_repo.clear_history(x_user_id, db_path=DATABASE)
     return {"status": "ok"}
 
 
 @app.get("/api/chat/history")
-async def get_chat_history(x_user_id: str = Header(...), limit: int = Query(50, ge=1, le=200)):
+async def get_chat_history(x_user_id: str = Depends(resolve_user_id), limit: int = Query(50, ge=1, le=200)):
     """
     Получить последние сообщения диалога для отображения в UI.
     Возвращаем role + content в хронологическом порядке.
@@ -2467,7 +2727,7 @@ async def get_chat_history(x_user_id: str = Header(...), limit: int = Query(50, 
 
 
 @app.get("/api/agent_state")
-async def get_agent_state(x_user_id: str = Header(...)):
+async def get_agent_state(x_user_id: str = Depends(resolve_user_id)):
     """
     Диагностика: получить текущее состояние агента (AgentState) для пользователя.
 

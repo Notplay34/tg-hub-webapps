@@ -1147,11 +1147,11 @@ body {
     font-size: 9px;
 }
 
-.linked-task, .linked-knowledge {
+.linked-task, .linked-project {
     transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
-.linked-task:hover, .linked-knowledge:hover {
+.linked-task:hover, .linked-project:hover {
     transform: translateX(4px);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
@@ -1948,7 +1948,7 @@ body {
     border-left-color: #ff9500;
 }
 
-.search-result-item[data-type="knowledge"] {
+.search-result-item[data-type="project"] {
     border-left-color: #34c759;
 }
 

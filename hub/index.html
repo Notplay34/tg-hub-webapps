@@ -7,9 +7,12 @@
     <meta http-equiv="Pragma" content="no-cache">
     <title>Hub</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <link rel="stylesheet" href="style.css?v=7">
+    <link rel="stylesheet" href="style.css?v=13">
 </head>
 <body>
+    <div id="anonymousBanner" class="anonymous-banner" style="display:none">
+        ⚠️ Откройте Hub через кнопку «Открыть Hub» в боте (под сообщением), иначе данные не загрузятся.
+    </div>
     <div class="app">
         <!-- ===== ГЛАВНЫЙ ЭКРАН ===== -->
         <section class="screen active" id="statsScreen">
@@ -46,7 +49,7 @@
             
             <div class="search-box-large">
                 <div class="search-icon">🔍</div>
-                <input type="text" id="globalSearchInput" placeholder="Поиск по задачам, людям, знаниям..." autofocus oninput="GlobalSearch.search()">
+                <input type="text" id="globalSearchInput" placeholder="Поиск по задачам, людям, проектам..." autofocus oninput="GlobalSearch.search()">
             </div>
             
             <main class="content search-results" id="searchResults">
@@ -132,32 +135,38 @@
             <main class="content" id="personCard"></main>
         </section>
 
-        <!-- ===== БАЗА ЗНАНИЙ ===== -->
-        <section class="screen" id="knowledgeScreen">
+        <!-- ===== ПРОЕКТЫ ===== -->
+        <section class="screen" id="projectsScreen">
             <header class="header">
-                <h1>База знаний</h1>
-                <button class="btn-icon" onclick="Knowledge.openModal()">+</button>
+                <h1>Проекты</h1>
+                <button class="btn-icon" onclick="Projects.openModal()">+</button>
             </header>
             
-            <div class="search-box">
-                <input type="text" id="knowledgeSearch" placeholder="Поиск..." oninput="Knowledge.render()">
-            </div>
+            <nav class="filters" id="projectsFilters"></nav>
             
-            <nav class="filters" id="knowledgeFilters"></nav>
-            
-            <main class="content" id="knowledgeContent">
-                <div class="pull-refresh" id="knowledgePullRefresh">
+            <main class="content" id="projectsContent">
+                <div class="pull-refresh" id="projectsPullRefresh">
                     <div class="pull-refresh-icon">↓</div>
                     <div>Потяните для обновления</div>
                 </div>
-                <div id="knowledgeList"></div>
+                <div id="projectsList"></div>
             </main>
-            <div class="empty" id="knowledgeEmpty">База пуста</div>
-            <div class="loading" id="knowledgeLoading">⏳ Загрузка...</div>
-            <div class="error" id="knowledgeError" style="display:none">
+            <div class="empty" id="projectsEmpty">Проектов нет</div>
+            <div class="loading" id="projectsLoading">⏳ Загрузка...</div>
+            <div class="error" id="projectsError" style="display:none">
                 <p>❌ Ошибка загрузки</p>
-                <button onclick="Knowledge.retry()">Повторить</button>
+                <button onclick="Projects.retry()">Повторить</button>
             </div>
+        </section>
+
+        <!-- ===== ПРОЕКТ (DASHBOARD) ===== -->
+        <section class="screen" id="projectScreen">
+            <header class="header">
+                <button class="btn-back" onclick="Projects.closeProject()">←</button>
+                <h1 id="projectTitle">Проект</h1>
+                <button class="btn-icon edit" onclick="Projects.edit()">✎</button>
+            </header>
+            <main class="content" id="projectCard"></main>
         </section>
 
         <!-- ===== ФИНАНСЫ ===== -->
@@ -182,13 +191,13 @@
             <main class="chat-container" id="chatContainer">
                 <div class="chat-welcome">
                     <div class="ai-avatar">🤖</div>
-                    <p>Привет! Я твой ассистент.<br>Спроси меня о задачах, людях, знаниях или финансах.</p>
+                    <p>Привет! Я твой ассистент.<br>Спроси меня о задачах, людях, проектах или финансах.</p>
                     <div class="chat-help">
                         <div class="chat-help-title">Примеры команд:</div>
                         <ul>
                             <li><span>📝 Задачи</span><br><code>создай задачу купить молоко на завтра</code><br><code>выполнено купить молоко</code></li>
                             <li><span>👤 Люди</span><br><code>добавь контакт Иванов Иван Иванович 03.03.1983 компаньон, обязательный</code><br><code>обнови контакт Иванов..., сделай его партнером по бизнесу</code></li>
-                            <li><span>📚 Знания</span><br><code>добавь заметку про встречу с Иваном</code></li>
+                            <li><span>📂 Проекты</span><br><code>создай проект Ремонт квартиры</code></li>
                             <li><span>💰 Финансы</span><br><code>добавь расход 1500 на еду сегодня</code><br><code>создай финансовую цель отпуск 200000</code></li>
                         </ul>
                     </div>
@@ -216,9 +225,9 @@
                 <span class="nav-icon">👤</span>
                 <span class="nav-label">Люди</span>
             </button>
-            <button class="nav-item" data-screen="knowledgeScreen">
-                <span class="nav-icon">📚</span>
-                <span class="nav-label">База</span>
+            <button class="nav-item" data-screen="projectsScreen">
+                <span class="nav-icon">📂</span>
+                <span class="nav-label">Проекты</span>
             </button>
             <button class="nav-item" data-screen="financeScreen">
                 <span class="nav-icon">💰</span>
@@ -265,6 +274,12 @@
                     <div class="form-group">
                         <label>Связать с человеком</label>
                         <select id="taskPerson">
+                            <option value="">— Не выбрано —</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Проект</label>
+                        <select id="taskProject">
                             <option value="">— Не выбрано —</option>
                         </select>
                     </div>
@@ -512,55 +527,88 @@
             </div>
         </div>
 
-        <!-- Знание -->
-        <div class="modal" id="knowledgeModal">
+        <!-- Проект -->
+        <div class="modal" id="projectModal">
             <div class="modal-content modal-full">
                 <div class="modal-header">
-                    <button class="modal-close" onclick="Knowledge.closeModal()">×</button>
-                    <h2 id="knowledgeModalTitle">Новая запись</h2>
-                    <button class="btn-save" onclick="Knowledge.save()">✓</button>
+                    <button class="modal-close" onclick="Projects.closeModal()">×</button>
+                    <h2 id="projectModalTitle">Новый проект</h2>
+                    <button class="btn-save" onclick="Projects.save()">✓</button>
                 </div>
-                <form id="knowledgeForm" onsubmit="return false">
-                    <input type="hidden" id="knowledgeId">
+                <form id="projectForm" onsubmit="return false">
+                    <input type="hidden" id="projectId">
                     <div class="form-group">
-                        <input type="text" id="knowledgeTitle" placeholder="Заголовок" required>
+                        <input type="text" id="projectName" placeholder="Название проекта" required>
                     </div>
                     <div class="form-group">
-                        <textarea id="knowledgeContent" rows="8" placeholder="Содержание..."></textarea>
+                        <textarea id="projectDesc" rows="3" placeholder="Описание / цель проекта"></textarea>
                     </div>
-                    <div class="form-group">
-                        <label>Связать с человеком</label>
-                        <select id="knowledgePerson">
-                            <option value="">— Не выбрано —</option>
-                        </select>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Статус</label>
+                            <select id="projectStatus">
+                                <option value="active">Активный</option>
+                                <option value="paused">На паузе</option>
+                                <option value="done">Завершён</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Дедлайн</label>
+                            <input type="date" id="projectDeadline">
+                        </div>
                     </div>
-                    <div class="form-section">
-                        <h3>Теги</h3>
-                        <div class="tags-container">
-                            <div class="tags-list" id="knowledgeTagsList"></div>
-                            <input type="text" id="knowledgeTagInput" placeholder="+ тег" onkeydown="if(event.key==='Enter'){event.preventDefault();Knowledge.addTag()}">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Бюджет</label>
+                            <input type="number" id="projectBudget" step="0.01" placeholder="0">
+                        </div>
+                        <div class="form-group">
+                            <label>Цель по доходу</label>
+                            <input type="number" id="projectRevenueGoal" step="0.01" placeholder="0">
                         </div>
                     </div>
                 </form>
-                <button class="btn-delete" id="knowledgeDelete" onclick="Knowledge.delete()">Удалить</button>
+                <button class="btn-delete" id="projectDelete" onclick="Projects.delete()">Удалить проект</button>
             </div>
         </div>
 
-        <!-- Просмотр знания -->
-        <div class="modal" id="knowledgeViewModal">
+        <!-- Добавить участника в проект -->
+        <div class="modal" id="projectMemberModal">
             <div class="modal-content">
                 <div class="modal-header">
-                    <button class="modal-close" onclick="Knowledge.closeView()">×</button>
-                    <h2 id="knowledgeViewTitle">Заголовок</h2>
-                    <button class="btn-icon edit" onclick="Knowledge.editCurrent()">✎</button>
+                    <button class="modal-close" onclick="Projects.closeMemberModal()">×</button>
+                    <h2>Добавить участника</h2>
+                    <button class="btn-save" onclick="Projects.saveMember()">✓</button>
                 </div>
-                <div class="view-content" id="knowledgeViewContent"></div>
-                <div class="view-meta" id="knowledgeViewMeta"></div>
+                <div class="form-group">
+                    <label>Человек</label>
+                    <select id="projectMemberPerson">
+                        <option value="">— Выберите —</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Роль</label>
+                    <input type="text" id="projectMemberRole" placeholder="Роль в проекте">
+                </div>
+            </div>
+        </div>
+
+        <!-- Заметка к проекту -->
+        <div class="modal" id="projectNoteModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button class="modal-close" onclick="Projects.closeNoteModal()">×</button>
+                    <h2>Новая заметка</h2>
+                    <button class="btn-save" onclick="Projects.saveNote()">✓</button>
+                </div>
+                <div class="form-group">
+                    <textarea id="projectNoteText" rows="4" placeholder="Заметка..."></textarea>
+                </div>
             </div>
         </div>
     </div>
 
     <script src="config.js"></script>
-    <script src="app.js?v=8nocache"></script>
+    <script src="app.js?v=13"></script>
 </body>
 </html>

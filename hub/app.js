@@ -13,14 +13,18 @@ if (tg) {
     tg.setHeaderColor('secondary_bg_color');
     if (tg.initDataUnsafe?.user?.id) userId = String(tg.initDataUnsafe.user.id);
 }
+// tg.initData — сырая строка; на мобилке initDataUnsafe иногда пуст, API проверит initData
+
+function getHeaders() {
+    const h = { 'Content-Type': 'application/json', 'X-User-Id': userId };
+    if (tg?.initData) h['X-Telegram-Init-Data'] = tg.initData;
+    return h;
+}
 
 // === API ===
 const API = {
     async request(method, endpoint, data = null) {
-        const options = {
-            method,
-            headers: { 'Content-Type': 'application/json', 'X-User-Id': userId }
-        };
+        const options = { method, headers: getHeaders() };
         if (data) options.body = JSON.stringify(data);
         
         try {
@@ -100,6 +104,12 @@ const Utils = {
         div.textContent = text;
         return div.innerHTML;
     },
+    // Убирает префикс [Папка] при отображении — остаются только простые задачи
+    displayTitle(title) {
+        if (!title) return '';
+        const m = title.match(/^\[[^\]]+\]\s*(.*)$/);
+        return m ? m[1].trim() || title : title;
+    },
     
     initials(fio) {
         if (!fio) return '?';
@@ -129,6 +139,10 @@ const Nav = {
             // Обновляем экраны при переходе
             if (screenId === 'statsScreen') {
                 Today.render();
+                removeFolderRemnants();
+            } else if (screenId === 'tasksScreen') {
+                Tasks.render();
+                removeFolderRemnants(); // мобильный кеш может оставлять старый HTML
             } else if (screenId === 'financeScreen') {
                 Finance.load();
             } else if (screenId === 'aiScreen') {
@@ -138,10 +152,32 @@ const Nav = {
     }
 };
 
+// Удаление остатков UI папок — на Главной, в Задачах, в модалках
+function removeFolderRemnants() {
+    const sel = '#statsScreen h3, #statsScreen h4, #statsScreen .folder-section, #statsScreen .filter, ' +
+        '#tasksScreen h3, #tasksScreen h4, #tasksScreen .folder-section, #tasksFilters .filter, #taskModal .form-group';
+    document.querySelectorAll(sel).forEach(el => {
+        const t = (el.textContent || '').trim();
+        const label = el.querySelector('label');
+        if (t.startsWith('Без папки') || t.includes('Папка:') || (label && (label.textContent || '').includes('Папка'))) {
+            el.remove();
+        }
+    });
+}
+
+// MutationObserver: удаляем «Без папки» и «Папка» при появлении в DOM
+function watchFolderRemnants() {
+    const obs = new MutationObserver(() => removeFolderRemnants());
+    ['statsScreen', 'tasksScreen', 'taskModal'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) obs.observe(el, { childList: true, subtree: true });
+    });
+}
+
 // === Данные ===
 let tasksData = [];
 let peopleData = [];
-let knowledgeData = [];
+let projectsData = [];
 let financeSummary = null;
 let financeTransactions = [];
 let financeGoals = [];
@@ -151,37 +187,37 @@ async function loadAllData(showLoading = true) {
     if (showLoading) {
         showLoadingState('tasks');
         showLoadingState('people');
-        showLoadingState('knowledge');
+        showLoadingState('projects');
     }
     
     try {
-        [tasksData, peopleData, knowledgeData] = await Promise.all([
+        [tasksData, peopleData, projectsData] = await Promise.all([
             API.request('GET', '/api/tasks'),
             API.request('GET', '/api/people'),
-            API.request('GET', '/api/knowledge')
+            API.request('GET', '/api/projects')
         ]);
         
         hideLoadingState('tasks');
         hideLoadingState('people');
-        hideLoadingState('knowledge');
+        hideLoadingState('projects');
         hideErrorState('tasks');
         hideErrorState('people');
-        hideErrorState('knowledge');
+        hideErrorState('projects');
         
         // Обновляем все экраны сразу
         Today.render();
+        removeFolderRemnants();
         Tasks.render();
         People.render();
-        Knowledge.render();
-        // Финансовый экран подгружаем отдельно при открытии/инициализации
+        Projects.render();
     } catch (e) {
         console.error('Load error:', e);
         hideLoadingState('tasks');
         hideLoadingState('people');
-        hideLoadingState('knowledge');
+        hideLoadingState('projects');
         showErrorState('tasks', e.message);
         showErrorState('people', e.message);
-        showErrorState('knowledge', e.message);
+        showErrorState('projects', e.message);
     }
 }
 
@@ -302,16 +338,16 @@ const GlobalSearch = {
             }
         });
         
-        // Поиск в знаниях
-        knowledgeData.forEach(k => {
-            if (k.title.toLowerCase().includes(query) || k.content?.toLowerCase().includes(query)) {
+        // Поиск в проектах
+        projectsData.forEach(pr => {
+            if (pr.title.toLowerCase().includes(query) || pr.description?.toLowerCase().includes(query)) {
                 allResults.push({
-                    type: 'knowledge',
-                    id: k.id,
-                    title: k.title,
-                    desc: k.content?.substring(0, 100) || '',
-                    icon: '📚',
-                    action: () => { Nav.goto('knowledgeScreen'); Knowledge.view(k.id); }
+                    type: 'project',
+                    id: pr.id,
+                    title: pr.title,
+                    desc: pr.description?.substring(0, 100) || '',
+                    icon: '📂',
+                    action: () => { Nav.goto('projectsScreen'); Projects.openProject(pr.id); }
                 });
             }
         });
@@ -327,9 +363,9 @@ const GlobalSearch = {
             results.innerHTML = allResults.map(r => `
                 <div class="search-result-item" data-type="${r.type}" onclick="GlobalSearch.select(${r.id}, '${r.type}')">
                     <div class="search-result-header">
-                        <span class="search-result-type">${r.type === 'task' ? 'Задача' : (r.type === 'person' ? 'Человек' : 'Знание')}</span>
+                        <span class="search-result-type">${r.type === 'task' ? 'Задача' : (r.type === 'person' ? 'Человек' : 'Проект')}</span>
                     </div>
-                    <div class="search-result-title">${Utils.escape(r.title)}</div>
+                    <div class="search-result-title">${Utils.escape(r.type === 'task' ? Utils.displayTitle(r.title) : r.title)}</div>
                     ${r.desc ? `<div class="search-result-desc">${Utils.escape(r.desc)}</div>` : ''}
                 </div>
             `).join('');
@@ -341,7 +377,7 @@ const GlobalSearch = {
         setTimeout(() => {
             if (type === 'task') Tasks.openModal(id);
             else if (type === 'person') People.openCard(id);
-            else if (type === 'knowledge') Knowledge.view(id);
+            else if (type === 'project') Projects.openProject(id);
         }, 300);
     }
 };
@@ -399,7 +435,31 @@ const Tasks = {
         }
         
         this.updatePersonSelect();
+        Projects.updateProjectSelect();
         this.updateSortLabel();
+        this.renderFilters(); // Перезаписываем фильтры — без папок
+        removeFolderRemnants(); // мобильный WebView кеш — страховка
+    },
+    
+    renderFilters() {
+        const container = document.getElementById('tasksFilters');
+        if (!container) return;
+        container.innerHTML = `
+            <button class="filter ${this.filter === 'all' ? 'active' : ''}" data-filter="all">Все</button>
+            <button class="filter ${this.filter === 'today' ? 'active' : ''}" data-filter="today">Сегодня</button>
+            <button class="filter ${this.filter === 'tomorrow' ? 'active' : ''}" data-filter="tomorrow">Завтра</button>
+            <button class="filter ${this.filter === 'week' ? 'active' : ''}" data-filter="week">Неделя</button>
+            <button class="filter ${this.filter === 'month' ? 'active' : ''}" data-filter="month">Месяц</button>
+            <button class="filter ${this.filter === 'done' ? 'active' : ''}" data-filter="done">Готово</button>
+        `;
+        container.querySelectorAll('.filter').forEach(btn => {
+            btn.addEventListener('click', () => {
+                container.querySelectorAll('.filter').forEach(f => f.classList.remove('active'));
+                btn.classList.add('active');
+                this.filter = btn.dataset.filter;
+                this.render();
+            });
+        });
     },
     
     toggleSort() {
@@ -513,7 +573,7 @@ const Tasks = {
                         <div class="card-body" style="flex:1">
                             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
                                 <span style="font-size:18px">${statusIcon}</span>
-                                <div class="card-title" style="flex:1;margin:0">${Utils.escape(task.title)}</div>
+                                <div class="card-title" style="flex:1;margin:0">${Utils.escape(Utils.displayTitle(task.title))}</div>
                             </div>
                             ${task.description ? `<div class="card-desc">${Utils.escape(task.description)}</div>` : ''}
                             <div class="card-meta">
@@ -544,11 +604,13 @@ const Tasks = {
         
         document.getElementById('taskModalTitle').textContent = task ? 'Редактировать' : 'Новая задача';
         document.getElementById('taskId').value = task ? task.id : '';
-        document.getElementById('taskTitle').value = task ? task.title : '';
+        document.getElementById('taskTitle').value = task ? Utils.displayTitle(task.title) : '';
         document.getElementById('taskDesc').value = task?.description || '';
         document.getElementById('taskDeadline').value = task?.deadline || Utils.today();
         document.getElementById('taskPriority').value = task?.priority || 'medium';
         document.getElementById('taskPerson').value = task?.person_id || '';
+        const taskProjectSelect = document.getElementById('taskProject');
+        if (taskProjectSelect) taskProjectSelect.value = task?.project_id || '';
         document.getElementById('taskDelete').style.display = task ? 'block' : 'none';
         
         const recurrence = task?.recurrence_type || 'none';
@@ -560,6 +622,12 @@ const Tasks = {
         } else {
             reminderSelect.value = 'none';
         }
+        
+        // Скрываем поле папки, если осталось в старом HTML
+        document.querySelectorAll('#taskForm .form-group').forEach(gr => {
+            const label = gr.querySelector('label');
+            if (label && (label.textContent || '').includes('Папка')) gr.style.display = 'none';
+        });
         
         modal.classList.add('open');
     },
@@ -573,12 +641,17 @@ const Tasks = {
         const reminderValue = document.getElementById('taskReminderSelect').value;
         const recurrenceValue = document.getElementById('taskRecurrence').value;
         const deadlineValue = document.getElementById('taskDeadline').value || null;
+        let title = document.getElementById('taskTitle').value.trim();
+        // Убираем остатки префикса [Папка] при сохранении
+        const m = title.match(/^\[[^\]]+\]\s*(.*)$/);
+        if (m) title = m[1].trim();
         const data = {
-            title: document.getElementById('taskTitle').value.trim(),
+            title,
             description: document.getElementById('taskDesc').value.trim(),
             deadline: deadlineValue,
             priority: document.getElementById('taskPriority').value,
             person_id: parseInt(document.getElementById('taskPerson').value) || null,
+            project_id: parseInt(document.getElementById('taskProject')?.value) || null,
             reminder_enabled: reminderValue !== 'none',
             reminder_time: reminderValue !== 'none' ? reminderValue : null,
             recurrence_type: recurrenceValue || 'none'
@@ -647,14 +720,7 @@ const Tasks = {
     },
     
     init() {
-        document.querySelectorAll('#tasksFilters .filter').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('#tasksFilters .filter').forEach(f => f.classList.remove('active'));
-                btn.classList.add('active');
-                this.filter = btn.dataset.filter;
-                this.render();
-            });
-        });
+        this.renderFilters(); // Фильтры без папок, обработчики в renderFilters
     }
 };
 
@@ -729,7 +795,8 @@ const People = {
         const options = '<option value="">— Не выбрано —</option>' + 
             peopleData.map(p => `<option value="${p.id}">${Utils.escape(p.fio)}</option>`).join('');
         document.getElementById('taskPerson').innerHTML = options;
-        document.getElementById('knowledgePerson').innerHTML = options;
+        const memberSelect = document.getElementById('projectMemberPerson');
+        if (memberSelect) memberSelect.innerHTML = options;
     },
     
     openCard(id) {
@@ -784,7 +851,7 @@ const People = {
                                 <div style="display:flex;align-items:center;gap:8px">
                                     <span style="font-size:16px">${t.done ? '✅' : '📋'}</span>
                                     <div style="flex:1">
-                                        <div class="card-title" style="margin:0;font-size:15px">${Utils.escape(t.title)}</div>
+                                        <div class="card-title" style="margin:0;font-size:15px">${Utils.escape(Utils.displayTitle(t.title))}</div>
                                         ${t.deadline ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px" class="${deadlineClass}">📅 ${Utils.formatDate(t.deadline)}</div>` : ''}
                                     </div>
                                     <span style="color:var(--accent);font-size:18px">→</span>
@@ -796,24 +863,27 @@ const People = {
             `;
         }
         
-        // Связанные знания
-        const relatedKnowledge = knowledgeData.filter(k => k.person_id === person.id);
-        if (relatedKnowledge.length) {
+        // Участие в проектах
+        const relatedProjects = projectsData.filter(pr => pr.members?.some(m => m.person_id === person.id));
+        if (relatedProjects.length) {
             html += `
                 <div class="card-section">
-                    <h4>Связанные записи (${relatedKnowledge.length})</h4>
-                    ${relatedKnowledge.map(k => `
-                        <div class="card linked-knowledge" onclick="Nav.goto('knowledgeScreen');Knowledge.view(${k.id})" style="margin-bottom:8px;cursor:pointer">
+                    <h4>Участвует в проектах (${relatedProjects.length})</h4>
+                    ${relatedProjects.map(pr => {
+                        const member = pr.members.find(m => m.person_id === person.id);
+                        const statusLabels = {active: '🟢', paused: '⏸️', done: '✅'};
+                        return `
+                        <div class="card linked-project" onclick="Nav.goto('projectsScreen');Projects.openProject(${pr.id})" style="margin-bottom:8px;cursor:pointer">
                             <div style="display:flex;align-items:center;gap:8px">
-                                <span style="font-size:16px">📚</span>
+                                <span style="font-size:16px">${statusLabels[pr.status] || '📂'}</span>
                                 <div style="flex:1">
-                                    <div class="card-title" style="margin:0;font-size:15px">${Utils.escape(k.title)}</div>
-                                    ${k.content ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px">${Utils.escape(k.content.substring(0, 60))}${k.content.length > 60 ? '...' : ''}</div>` : ''}
+                                    <div class="card-title" style="margin:0;font-size:15px">${Utils.escape(pr.title)}</div>
+                                    ${member?.role ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px">${Utils.escape(member.role)}</div>` : ''}
                                 </div>
                                 <span style="color:var(--accent);font-size:18px">→</span>
                             </div>
                         </div>
-                    `).join('')}
+                    `}).join('')}
                 </div>
             `;
         }
@@ -1005,28 +1075,22 @@ const People = {
     }
 };
 
-// === БАЗА ЗНАНИЙ ===
-const Knowledge = {
+// === ПРОЕКТЫ ===
+const Projects = {
     currentId: null,
-    editTags: [],
     filter: 'all',
     
     async render() {
-        const list = document.getElementById('knowledgeList');
-        const empty = document.getElementById('knowledgeEmpty');
-        const search = document.getElementById('knowledgeSearch').value.toLowerCase();
+        const list = document.getElementById('projectsList');
+        const empty = document.getElementById('projectsEmpty');
         
-        hideLoadingState('knowledge');
-        hideErrorState('knowledge');
+        hideLoadingState('projects');
+        hideErrorState('projects');
         
-        let items = [...knowledgeData];
-        
-        if (search) {
-            items = items.filter(k => k.title.toLowerCase().includes(search) || k.content?.toLowerCase().includes(search));
-        }
+        let items = [...projectsData];
         
         if (this.filter !== 'all') {
-            items = items.filter(k => k.tags?.includes(this.filter));
+            items = items.filter(pr => pr.status === this.filter);
         }
         
         if (items.length === 0) {
@@ -1034,40 +1098,56 @@ const Knowledge = {
             empty.classList.add('show');
         } else {
             empty.classList.remove('show');
-            list.innerHTML = items.map(k => this.renderItem(k)).join('');
+            list.innerHTML = items.map(pr => this.renderItem(pr)).join('');
         }
         
         this.renderFilters();
+        this.updateProjectSelect();
     },
     
-    renderItem(item) {
-        const person = item.person_id ? peopleData.find(p => p.id === item.person_id) : null;
+    renderItem(project) {
+        const statusLabels = {active: '🟢 Активный', paused: '⏸️ На паузе', done: '✅ Завершён'};
+        const statusColors = {active: 'var(--success)', paused: 'var(--warning)', done: 'var(--text-secondary)'};
+        
+        const totalTasks = project.tasks_count || 0;
+        const doneTasks = project.tasks_done || 0;
+        const pct = totalTasks > 0 ? Math.round(doneTasks / totalTasks * 100) : 0;
+        
+        let finMeta = '';
+        if (project.budget) finMeta += `💰 ${Number(project.budget).toFixed(0)}`;
+        if (project.revenue_goal) finMeta += `${finMeta ? ' · ' : ''}🎯 ${Number(project.revenue_goal).toFixed(0)}`;
         
         return `
-            <div class="card" onclick="Knowledge.view(${item.id})">
-                <button class="card-delete" onclick="event.stopPropagation();Knowledge.delete(${item.id})" title="Удалить">×</button>
-                <div class="card-title">${Utils.escape(item.title)}</div>
-                ${item.content ? `<div class="card-desc">${Utils.escape(item.content)}</div>` : ''}
-                ${item.tags?.length ? `<div class="card-tags">${item.tags.map(t => `<span>${Utils.escape(t)}</span>`).join('')}</div>` : ''}
-                        ${person ? `
-                            <div class="linked-person" onclick="event.stopPropagation();People.openCard(${person.id})" style="cursor:pointer;margin-top:8px">
-                                <span class="avatar small">${Utils.initials(person.fio)}</span>
-                                <span style="font-weight:500">${Utils.escape(person.fio)}</span>
-                                <span style="margin-left:auto;color:var(--accent);font-size:12px">→</span>
-                            </div>
-                        ` : ''}
+            <div class="card" onclick="Projects.openProject(${project.id})" style="position:relative">
+                <button class="card-delete" onclick="event.stopPropagation();Projects.delete(${project.id})" title="Удалить">×</button>
+                <div class="card-title">${Utils.escape(project.title)}</div>
+                ${project.description ? `<div class="card-desc">${Utils.escape(project.description)}</div>` : ''}
+                <div class="card-meta">
+                    <span style="color:${statusColors[project.status] || 'var(--text-secondary)'}">${statusLabels[project.status] || project.status}</span>
+                    ${project.deadline ? `<span>📅 ${Utils.formatDate(project.deadline)}</span>` : ''}
+                    ${project.members_count ? `<span>👥 ${project.members_count}</span>` : ''}
+                </div>
+                ${totalTasks > 0 ? `
+                <div class="project-progress" style="margin-top:8px">
+                    <div class="goal-progress">
+                        <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
+                        <div class="text">${doneTasks}/${totalTasks} задач (${pct}%)</div>
+                    </div>
+                </div>` : ''}
+                ${finMeta ? `<div style="margin-top:6px;font-size:12px;color:var(--text-secondary)">${finMeta}</div>` : ''}
             </div>
         `;
     },
     
     renderFilters() {
-        const tags = new Set();
-        knowledgeData.forEach(k => k.tags?.forEach(t => tags.add(t)));
-        
-        const container = document.getElementById('knowledgeFilters');
-        container.innerHTML = `<button class="filter ${this.filter === 'all' ? 'active' : ''}" data-filter="all">Все</button>` +
-            Array.from(tags).sort().map(t => `<button class="filter ${this.filter === t ? 'active' : ''}" data-filter="${Utils.escape(t)}">${Utils.escape(t)}</button>`).join('');
-        
+        const container = document.getElementById('projectsFilters');
+        if (!container) return;
+        container.innerHTML = `
+            <button class="filter ${this.filter === 'all' ? 'active' : ''}" data-filter="all">Все</button>
+            <button class="filter ${this.filter === 'active' ? 'active' : ''}" data-filter="active">Активные</button>
+            <button class="filter ${this.filter === 'paused' ? 'active' : ''}" data-filter="paused">На паузе</button>
+            <button class="filter ${this.filter === 'done' ? 'active' : ''}" data-filter="done">Завершённые</button>
+        `;
         container.querySelectorAll('.filter').forEach(btn => {
             btn.addEventListener('click', () => {
                 this.filter = btn.dataset.filter;
@@ -1076,140 +1156,310 @@ const Knowledge = {
         });
     },
     
-    view(id) {
-        const item = knowledgeData.find(k => k.id === id);
-        if (!item) return;
-        
-        this.currentId = id;
-        document.getElementById('knowledgeViewTitle').textContent = item.title;
-        document.getElementById('knowledgeViewContent').textContent = item.content || '';
-        
-        const person = item.person_id ? peopleData.find(p => p.id === item.person_id) : null;
-        
-        let meta = '';
-        if (person) {
-            meta += `
-                <div class="linked-person-view" onclick="People.openCard(${person.id})" style="cursor:pointer;padding:12px;background:var(--bg-secondary);border-radius:12px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
-                    <span class="avatar">${Utils.initials(person.fio)}</span>
-                    <div style="flex:1">
-                        <div style="font-weight:600;font-size:14px">${Utils.escape(person.fio)}</div>
-                        <div style="font-size:12px;color:var(--text-secondary)">Связанный человек</div>
-                    </div>
-                    <span style="color:var(--accent);font-size:20px">→</span>
-                </div>
-            `;
-        }
-        if (item.tags?.length) {
-            meta += `<div class="tags">${item.tags.map(t => `<span>${Utils.escape(t)}</span>`).join('')}</div>`;
-        }
-        meta += `<div style="margin-top:12px;font-size:12px;color:var(--text-secondary)">${Utils.formatDateTime(item.created_at)}</div>`;
-        document.getElementById('knowledgeViewMeta').innerHTML = meta;
-        
-        document.getElementById('knowledgeViewModal').classList.add('open');
+    updateProjectSelect() {
+        const select = document.getElementById('taskProject');
+        if (!select) return;
+        select.innerHTML = '<option value="">— Не выбрано —</option>' +
+            projectsData.filter(p => p.status === 'active').map(p => `<option value="${p.id}">${Utils.escape(p.title)}</option>`).join('');
     },
     
-    closeView() {
-        document.getElementById('knowledgeViewModal').classList.remove('open');
+    async openProject(id) {
+        const project = projectsData.find(pr => pr.id === id);
+        if (!project) return;
+        
+        this.currentId = id;
+        document.getElementById('projectTitle').textContent = project.title;
+        
+        // Load full project with summary
+        try {
+            const summary = await API.request('GET', `/api/projects/${id}/summary`);
+            this.renderProject(project, summary);
+        } catch (e) {
+            this.renderProject(project, null);
+        }
+        
+        Nav.goto('projectScreen');
+    },
+    
+    closeProject() {
+        Nav.goto('projectsScreen');
         this.currentId = null;
     },
     
-    editCurrent() {
-        const id = this.currentId; // Сохраняем ID перед закрытием
-        if (!id) return;
-        document.getElementById('knowledgeViewModal').classList.remove('open');
-        this.openModal(id); // Используем сохранённый ID
+    renderProject(project, summary) {
+        const statusLabels = {active: '🟢 Активный', paused: '⏸️ На паузе', done: '✅ Завершён'};
+        const totalTasks = summary?.tasks_total || 0;
+        const doneTasks = summary?.tasks_done || 0;
+        const pct = totalTasks > 0 ? Math.round(doneTasks / totalTasks * 100) : 0;
+        
+        const tasks = summary?.tasks || [];
+        const members = project.members || [];
+        const notes = summary?.notes || [];
+        
+        let html = '';
+        
+        // Шапка
+        html += `
+            <div class="card-section">
+                <div class="card-field"><label>Статус</label><p>${statusLabels[project.status] || project.status}</p></div>
+                ${project.deadline ? `<div class="card-field"><label>Дедлайн</label><p>📅 ${Utils.formatDate(project.deadline)}</p></div>` : ''}
+                ${project.description ? `<div class="card-field"><label>Описание</label><p>${Utils.escape(project.description)}</p></div>` : ''}
+            </div>
+        `;
+        
+        // Прогресс
+        if (totalTasks > 0) {
+            html += `
+                <div class="card-section">
+                    <h4>Прогресс</h4>
+                    <div class="goal-progress">
+                        <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
+                        <div class="text">${doneTasks}/${totalTasks} задач выполнено (${pct}%)</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // Финансы
+        if (project.budget || project.revenue_goal) {
+            html += `<div class="card-section"><h4>Финансы</h4>`;
+            if (project.budget) html += `<div class="card-field"><label>Бюджет</label><p>💰 ${Number(project.budget).toFixed(0)}</p></div>`;
+            if (project.revenue_goal) html += `<div class="card-field"><label>Цель по доходу</label><p>🎯 ${Number(project.revenue_goal).toFixed(0)}</p></div>`;
+            html += `</div>`;
+        }
+        
+        // Задачи
+        html += `
+            <div class="card-section">
+                <div class="notes-header">
+                    <h4>Задачи (${totalTasks})</h4>
+                    <button class="btn-add-note" onclick="Projects.addTask()">+ Добавить</button>
+                </div>
+                ${tasks.length ? tasks.map(t => {
+                    const today = Utils.today();
+                    const deadlineClass = t.deadline ? (t.deadline < today ? 'overdue' : (t.deadline === today ? 'today' : '')) : '';
+                    return `
+                        <div class="card ${t.done ? 'done' : ''}" onclick="Tasks.openModal(${t.id})" style="margin-bottom:8px;cursor:pointer">
+                            <div style="display:flex;align-items:center;gap:8px">
+                                <span style="font-size:16px">${t.done ? '✅' : '📋'}</span>
+                                <div style="flex:1">
+                                    <div class="card-title" style="margin:0;font-size:15px">${Utils.escape(Utils.displayTitle(t.title))}</div>
+                                    ${t.deadline ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px" class="${deadlineClass}">📅 ${Utils.formatDate(t.deadline)}</div>` : ''}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('') : '<p class="empty">Нет задач</p>'}
+            </div>
+        `;
+        
+        // Команда
+        html += `
+            <div class="card-section">
+                <div class="notes-header">
+                    <h4>Команда (${members.length})</h4>
+                    <button class="btn-add-note" onclick="Projects.openMemberModal()">+ Добавить</button>
+                </div>
+                ${members.length ? members.map(m => {
+                    const person = peopleData.find(p => p.id === m.person_id);
+                    if (!person) return '';
+                    return `
+                        <div class="person-item" style="position:relative;padding:8px 12px" onclick="People.openCard(${person.id})">
+                            <button class="card-delete" onclick="event.stopPropagation();Projects.removeMember(${m.id})" title="Убрать" style="position:absolute;top:8px;right:8px">×</button>
+                            <div class="avatar small">${Utils.initials(person.fio)}</div>
+                            <div class="person-info">
+                                <h3 style="font-size:14px;margin:0">${Utils.escape(person.fio)}</h3>
+                                ${m.role ? `<p style="font-size:12px;margin:2px 0 0">${Utils.escape(m.role)}</p>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }).join('') : '<p class="empty">Нет участников</p>'}
+            </div>
+        `;
+        
+        // Лог заметок
+        html += `
+            <div class="card-section">
+                <div class="notes-header">
+                    <h4>Лог</h4>
+                    <button class="btn-add-note" onclick="Projects.openNoteModal()">+ Добавить</button>
+                </div>
+                ${notes.length ? notes.map(n => `
+                    <div class="note-item">
+                        <div class="note-date">${Utils.formatDateTime(n.created_at)}</div>
+                        <div class="note-text">${Utils.escape(n.text)}</div>
+                        <button class="note-delete" onclick="Projects.deleteNote(${n.id})">Удалить</button>
+                    </div>
+                `).join('') : '<p class="empty">Нет заметок</p>'}
+            </div>
+        `;
+        
+        document.getElementById('projectCard').innerHTML = html;
+    },
+    
+    addTask() {
+        Tasks.openModal();
+        // Pre-select this project
+        setTimeout(() => {
+            const select = document.getElementById('taskProject');
+            if (select && this.currentId) select.value = this.currentId;
+        }, 100);
     },
     
     openModal(id = null) {
-        const item = id ? knowledgeData.find(k => k.id === id) : null;
+        const project = id ? projectsData.find(pr => pr.id === id) : null;
         
-        document.getElementById('knowledgeModalTitle').textContent = item ? 'Редактировать' : 'Новая запись';
-        document.getElementById('knowledgeId').value = item ? item.id : '';
-        document.getElementById('knowledgeTitle').value = item?.title || '';
-        document.getElementById('knowledgeContent').value = item?.content || '';
-        document.getElementById('knowledgePerson').value = item?.person_id || '';
+        document.getElementById('projectModalTitle').textContent = project ? 'Редактировать' : 'Новый проект';
+        document.getElementById('projectId').value = project ? project.id : '';
+        document.getElementById('projectName').value = project?.title || '';
+        document.getElementById('projectDesc').value = project?.description || '';
+        document.getElementById('projectStatus').value = project?.status || 'active';
+        document.getElementById('projectDeadline').value = project?.deadline || '';
+        document.getElementById('projectBudget').value = project?.budget || '';
+        document.getElementById('projectRevenueGoal').value = project?.revenue_goal || '';
         
-        this.editTags = item?.tags ? [...item.tags] : [];
-        this.renderTags();
-        
-        document.getElementById('knowledgeDelete').style.display = item ? 'block' : 'none';
-        document.getElementById('knowledgeModal').classList.add('open');
+        document.getElementById('projectDelete').style.display = project ? 'block' : 'none';
+        document.getElementById('projectModal').classList.add('open');
     },
     
     closeModal() {
-        document.getElementById('knowledgeModal').classList.remove('open');
+        document.getElementById('projectModal').classList.remove('open');
     },
     
-    renderTags() {
-        document.getElementById('knowledgeTagsList').innerHTML = this.editTags.map(t => 
-            `<span class="tag">${Utils.escape(t)}<span class="tag-remove" onclick="Knowledge.removeTag('${Utils.escape(t)}')">&times;</span></span>`
-        ).join('');
-    },
-    
-    addTag() {
-        const input = document.getElementById('knowledgeTagInput');
-        const val = input.value.trim();
-        if (val && !this.editTags.includes(val)) {
-            this.editTags.push(val);
-            this.renderTags();
-        }
-        input.value = '';
-    },
-    
-    removeTag(t) {
-        this.editTags = this.editTags.filter(x => x !== t);
-        this.renderTags();
+    edit() {
+        this.openModal(this.currentId);
     },
     
     async save() {
-        const id = document.getElementById('knowledgeId').value;
+        const id = document.getElementById('projectId').value;
         const data = {
-            title: document.getElementById('knowledgeTitle').value.trim(),
-            content: document.getElementById('knowledgeContent').value.trim(),
-            tags: this.editTags,
-            person_id: parseInt(document.getElementById('knowledgePerson').value) || null
+            title: document.getElementById('projectName').value.trim(),
+            description: document.getElementById('projectDesc').value.trim(),
+            status: document.getElementById('projectStatus').value,
+            deadline: document.getElementById('projectDeadline').value || null,
+            budget: parseFloat(document.getElementById('projectBudget').value) || null,
+            revenue_goal: parseFloat(document.getElementById('projectRevenueGoal').value) || null
         };
         
-        if (!data.title) return alert('Введите заголовок');
+        if (!data.title) return alert('Введите название');
         
         try {
             if (id) {
-                await API.request('PATCH', `/api/knowledge/${id}`, data);
+                await API.request('PATCH', `/api/projects/${id}`, data);
             } else {
-                await API.request('POST', '/api/knowledge', data);
+                const result = await API.request('POST', '/api/projects', data);
+                this.currentId = result.id;
             }
             this.closeModal();
             await loadAllData(false);
             this.render();
+            
+            if (this.currentId) {
+                const pr = projectsData.find(p => p.id === this.currentId);
+                if (pr) {
+                    document.getElementById('projectTitle').textContent = pr.title;
+                    try {
+                        const summary = await API.request('GET', `/api/projects/${this.currentId}/summary`);
+                        this.renderProject(pr, summary);
+                    } catch (e) { this.renderProject(pr, null); }
+                }
+            }
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         } catch (e) {
             console.error('Save error:', e);
             const errorMsg = e.message || 'Ошибка сохранения';
-            if (tg?.showAlert) {
-                tg.showAlert(`Ошибка: ${errorMsg}`);
-            } else {
-                alert(`Ошибка сохранения: ${errorMsg}`);
-            }
+            if (tg?.showAlert) tg.showAlert(`Ошибка: ${errorMsg}`);
+            else alert(`Ошибка сохранения: ${errorMsg}`);
         }
     },
     
     async delete(id = null) {
-        const itemId = id || document.getElementById('knowledgeId').value;
-        if (!itemId) return;
+        const projectId = id || document.getElementById('projectId').value;
+        if (!projectId) return;
         
         const doDelete = async () => {
-            await API.request('DELETE', `/api/knowledge/${itemId}`);
-            if (!id) this.closeModal();
+            await API.request('DELETE', `/api/projects/${projectId}`);
+            if (!id) {
+                this.closeModal();
+                this.closeProject();
+            }
             await loadAllData(false);
             this.render();
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         };
         
-        if (tg?.showConfirm) {
-            tg.showConfirm('Удалить запись?', ok => { if (ok) doDelete(); });
-        } else if (confirm('Удалить запись?')) {
-            doDelete();
+        if (tg?.showConfirm) tg.showConfirm('Удалить проект?', ok => { if (ok) doDelete(); });
+        else if (confirm('Удалить проект?')) doDelete();
+    },
+    
+    // Members
+    openMemberModal() {
+        People.updateSelects();
+        document.getElementById('projectMemberPerson').value = '';
+        document.getElementById('projectMemberRole').value = '';
+        document.getElementById('projectMemberModal').classList.add('open');
+    },
+    
+    closeMemberModal() {
+        document.getElementById('projectMemberModal').classList.remove('open');
+    },
+    
+    async saveMember() {
+        const personId = parseInt(document.getElementById('projectMemberPerson').value);
+        const role = document.getElementById('projectMemberRole').value.trim();
+        if (!personId) return alert('Выберите человека');
+        
+        try {
+            await API.request('POST', `/api/projects/${this.currentId}/members`, { person_id: personId, role });
+            this.closeMemberModal();
+            await loadAllData(false);
+            await this.openProject(this.currentId);
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        } catch (e) {
+            const msg = e.message || 'Ошибка';
+            if (tg?.showAlert) tg.showAlert(msg); else alert(msg);
         }
+    },
+    
+    async removeMember(memberId) {
+        const doDelete = async () => {
+            await API.request('DELETE', `/api/projects/${this.currentId}/members/${memberId}`);
+            await loadAllData(false);
+            await this.openProject(this.currentId);
+            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        };
+        if (tg?.showConfirm) tg.showConfirm('Убрать участника?', ok => { if (ok) doDelete(); });
+        else if (confirm('Убрать участника?')) doDelete();
+    },
+    
+    // Notes
+    openNoteModal() {
+        document.getElementById('projectNoteText').value = '';
+        document.getElementById('projectNoteModal').classList.add('open');
+    },
+    
+    closeNoteModal() {
+        document.getElementById('projectNoteModal').classList.remove('open');
+    },
+    
+    async saveNote() {
+        const text = document.getElementById('projectNoteText').value.trim();
+        if (!text) return;
+        
+        try {
+            await API.request('POST', `/api/projects/${this.currentId}/notes`, { text });
+            this.closeNoteModal();
+            await this.openProject(this.currentId);
+        } catch (e) {}
+    },
+    
+    async deleteNote(noteId) {
+        const doDelete = async () => {
+            await API.request('DELETE', `/api/projects/${this.currentId}/notes/${noteId}`);
+            await this.openProject(this.currentId);
+        };
+        if (tg?.showConfirm) tg.showConfirm('Удалить заметку?', ok => { if (ok) doDelete(); });
+        else if (confirm('Удалить?')) doDelete();
     },
     
     async retry() {
@@ -1264,13 +1514,13 @@ const Timeline = {
         const entityLabels = {
             task: 'Задача',
             person: 'Человек',
-            knowledge: 'Запись'
+            project: 'Проект'
         };
         
         const entityColors = {
             task: 'var(--accent)',
             person: 'var(--warning)',
-            knowledge: 'var(--success)'
+            project: 'var(--success)'
         };
         
         const action = actionLabels[item.action_type] || item.action_type;
@@ -1282,8 +1532,8 @@ const Timeline = {
             clickAction = `onclick="Nav.goto('tasksScreen');Tasks.openModal(${item.entity_id})"`;
         } else if (item.entity_type === 'person') {
             clickAction = `onclick="Nav.goto('peopleScreen');People.openCard(${item.entity_id})"`;
-        } else if (item.entity_type === 'knowledge') {
-            clickAction = `onclick="Nav.goto('knowledgeScreen');Knowledge.view(${item.entity_id})"`;
+        } else if (item.entity_type === 'project') {
+            clickAction = `onclick="Nav.goto('projectsScreen');Projects.openProject(${item.entity_id})"`;
         }
         
         return `
@@ -1362,10 +1612,7 @@ const AI = {
             
             const response = await fetch(API_URL + '/api/chat', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-User-Id': userId
-                },
+                headers: getHeaders(),
                 body: JSON.stringify({ message: text }),
                 signal: controller.signal
             });
@@ -1412,7 +1659,7 @@ const AI = {
         try {
             await fetch(API_URL + '/api/chat/history', {
                 method: 'DELETE',
-                headers: { 'X-User-Id': userId }
+                headers: getHeaders()
             });
             
             // Очищаем UI
@@ -1421,7 +1668,7 @@ const AI = {
                 <div class="chat-welcome">
                     <div class="chat-welcome-icon">🤖</div>
                     <p>Привет! Я твой ИИ-ассистент.</p>
-                    <p>Спроси меня о задачах, людях или знаниях.</p>
+                    <p>Спроси меня о задачах, людях или проектах.</p>
                 </div>
             `;
             
@@ -1511,9 +1758,9 @@ async function init() {
         if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
     });
     
-    initPullToRefresh('knowledgeContent', async () => {
+    initPullToRefresh('projectsContent', async () => {
         await loadAllData();
-        Knowledge.render();
+        Projects.render();
         if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
     });
     
@@ -1521,7 +1768,9 @@ async function init() {
     Today.render();
     Tasks.render();
     People.render();
-    Knowledge.render();
+    Projects.render();
+    removeFolderRemnants();
+    watchFolderRemnants(); // Удаляем папки при любом добавлении в DOM
     await Finance.load();
     
     // Закрытие модалов
@@ -1531,9 +1780,10 @@ async function init() {
         });
     });
 
-    // Автопереключение на текущий месяц при возврате в приложение (смена месяца в календаре)
+    // Автопереключение при возврате в приложение
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState !== 'visible') return;
+        removeFolderRemnants(); // мобильный — убираем папки при возврате
         const financeScreen = document.getElementById('financeScreen');
         if (!financeScreen || !financeScreen.classList.contains('active')) return;
         const now = new Date();
