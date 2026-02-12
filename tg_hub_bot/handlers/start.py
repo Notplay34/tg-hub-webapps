@@ -1,11 +1,12 @@
 """
-Хендлер команды /start и клавиатуры: inline (Web App) и reply (быстрые действия).
+Хендлер команды /start — приветствие, Hub и быстрые кнопки.
 
-ARCH: только регистрация команды и формат ответа (текст, клавиатура).
-Бизнес-логику не добавлять — в services.
+Доступ всем.
 """
 
 from __future__ import annotations
+
+import logging
 
 from aiogram import Dispatcher
 from aiogram.filters import CommandStart
@@ -18,58 +19,57 @@ from aiogram.types import (
     WebAppInfo,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def get_reply_keyboard() -> ReplyKeyboardMarkup:
-    """
-    Постоянная клавиатура: быстрые действия.
-    Hub только через inline — reply открывает без initData, данные не грузятся.
-    """
+    """Постоянная клавиатура: быстрые действия."""
     keyboard = [
         [KeyboardButton(text="📋 Что сегодня?"), KeyboardButton(text="💰 Итоги по деньгам")],
-        [KeyboardButton(text="🎯 Мои цели"), KeyboardButton(text="🤖 Задать вопрос")],
+        [KeyboardButton(text="🎯 Мои цели"), KeyboardButton(text="📂 Сводка по проектам")],
     ]
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
-        input_field_placeholder="Напиши задачу, расход или вопрос...",
+        input_field_placeholder="Добавь задачу, расход или спроси что угодно...",
     )
 
 
-def get_main_keyboard(webapp_url: str | None) -> InlineKeyboardMarkup | None:
-    """Кнопка «Старт» — открывает Hub Web App."""
-    if not webapp_url:
-        return None
+def get_hub_keyboard(webapp_url: str) -> InlineKeyboardMarkup:
+    """Кнопка «Открыть Hub» — Web App."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Открыть Hub", web_app=WebAppInfo(url=webapp_url))]
+            [InlineKeyboardButton(text="📱 Открыть Hub", web_app=WebAppInfo(url=webapp_url))]
         ]
     )
 
 
 def register_start_handler(dp: Dispatcher, webapp_url: str | None = None) -> None:
-    """Регистрирует хендлер команды /start."""
+    """Регистрирует хендлер команды /start. Доступ всем — Hub + быстрые кнопки."""
 
     @dp.message(CommandStart())
     async def cmd_start(message: Message) -> None:
-        # Первое сообщение: inline "Открыть Hub" (важно — initData есть только у inline, не у reply)
-        # Reply-клавиатура идёт вторым сообщением
-        kwargs = {}
-        if webapp_url:
-            kwargs["reply_markup"] = get_main_keyboard(webapp_url)
-        await message.answer(
-            "👋 <b>YouHub</b> — твой личный хаб: задачи, люди, деньги и ИИ в одном месте.\n\n"
-            "📱 <b>Нажми кнопку ниже</b> — откроется Hub с твоими задачами.",
-            **kwargs,
-        )
-        await message.answer(
-            "Клавиатура быстрых действий:",
-            reply_markup=get_reply_keyboard(),
-        )
+        user_id = str(message.from_user.id) if message.from_user else None
+        if not user_id:
+            return
+
         text = (
-            "Можешь <b>нажать кнопку</b> — бот ответит по твоим данным. "
-            "Или написать: «добавь задачу купить молоко», «потратил 500 на обед», «что у меня сегодня?»\n\n"
-            "📋 Задачи · 👤 Люди · 📂 Проекты · 💰 Финансы · 🤖 ИИ"
+            "👋 <b>Привет!</b>\n\n"
+            "Пиши <i>«добавь задачу купить молоко»</i>, <i>«расход 500 обед»</i>, "
+            "<i>«что сегодня?»</i> — бот поймёт.\n\n"
+            "📱 <b>«Открыть Hub»</b> — полный интерфейс: задачи, проекты, финансы.\n\n"
         )
         if not webapp_url:
             text += "\n\n<i>⚠️ WEBAPP_HUB_URL не настроен</i>"
-        await message.answer(text)
+
+        # Сообщение с кнопкой Hub
+        if webapp_url:
+            await message.answer(text, reply_markup=get_hub_keyboard(webapp_url))
+        else:
+            await message.answer(text)
+
+        # Reply-кнопки (Что сегодня, Итоги, и т.д.)
+        await message.answer(
+            "Быстрые кнопки:",
+            reply_markup=get_reply_keyboard(),
+        )

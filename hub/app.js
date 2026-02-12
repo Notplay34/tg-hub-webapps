@@ -1770,7 +1770,7 @@ async function init() {
     People.render();
     Projects.render();
     removeFolderRemnants();
-    watchFolderRemnants(); // Удаляем папки при любом добавлении в DOM
+    watchFolderRemnants();
     await Finance.load();
     
     // Закрытие модалов
@@ -1783,7 +1783,7 @@ async function init() {
     // Автопереключение при возврате в приложение
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState !== 'visible') return;
-        removeFolderRemnants(); // мобильный — убираем папки при возврате
+        removeFolderRemnants();
         const financeScreen = document.getElementById('financeScreen');
         if (!financeScreen || !financeScreen.classList.contains('active')) return;
         const now = new Date();

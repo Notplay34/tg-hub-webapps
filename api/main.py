@@ -2398,6 +2398,12 @@ async def chat(msg: ChatMessage, x_user_id: str = Depends(resolve_user_id)):
             "мои цели", "🎯 мои цели", "какие цели", "финансовые цели", "покажи цели",
         )
     )
+    is_projects_summary_query = any(
+        phrase in text_lower for phrase in (
+            "сводка по проектам", "📂 сводка по проектам", "мои проекты",
+            "какие проекты", "покажи проекты",
+        )
+    )
 
     async with aiosqlite.connect(DATABASE) as db:
         db.row_factory = aiosqlite.Row
@@ -2600,6 +2606,29 @@ async def chat(msg: ChatMessage, x_user_id: str = Depends(resolve_user_id)):
             response_goals = "\n".join(lines).strip()
             await chat_repo.append_turn_and_trim(uid, msg.message, response_goals, CHAT_HISTORY_LIMIT, db_path=DATABASE)
             return {"response": response_goals, "action_executed": False}
+        
+        # Запрос «Сводка по проектам» — только из БД
+        if is_projects_summary_query:
+            lines = ["📂 <b>Проекты</b>", ""]
+            if projects_ctx:
+                for pr in projects_ctx:
+                    title = pr.get("title") or "—"
+                    total = pr.get("tasks_total") or 0
+                    done = pr.get("tasks_done") or 0
+                    status = pr.get("status") or "active"
+                    lines.append(f"• <b>{title}</b> ({status})")
+                    lines.append(f"  Задачи: {done}/{total} выполнено")
+                    lines.append("")
+            else:
+                lines.append("Проектов пока нет.")
+                lines.append("")
+                lines.append("💡 Создать: Hub → Проекты или напиши: <i>создай проект название</i>")
+            if uid == "anonymous":
+                lines.append("")
+                lines.append("💡 Откройте Hub из приложения Telegram, чтобы видеть проекты.")
+            response_projects = "\n".join(lines).strip()
+            await chat_repo.append_turn_and_trim(uid, msg.message, response_projects, CHAT_HISTORY_LIMIT, db_path=DATABASE)
+            return {"response": response_projects, "action_executed": False}
         
         # Загружаем последние N сообщений для контекста (меньше = быстрее ответ и без устаревших фактов из истории)
         chat_history = await chat_repo.get_recent_history(
