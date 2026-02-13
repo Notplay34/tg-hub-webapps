@@ -1,5 +1,7 @@
 """
 Хендлер текстовых сообщений → ИИ. ARCH: только вызов ai_service и ответ пользователю.
+
+Проверка оплаты — без неё ответ «Оплатите через /start».
 """
 from __future__ import annotations
 
@@ -7,6 +9,8 @@ from aiogram import F, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message
 
+from config import PAYMENT_STARS
+from storage.bootstrap import get_paid_repo
 from tg_hub_bot.services.ai import AiService
 
 
@@ -24,6 +28,14 @@ async def _handle_chat_with_ai(message: Message, ai_service: AiService) -> None:
     user_id = message.from_user.id if message.from_user else None
     if not user_id:
         return
+
+    if PAYMENT_STARS > 0:
+        paid_repo = get_paid_repo()
+        if not await paid_repo.is_paid(str(user_id)):
+            await message.answer(
+                "💳 Сначала оплатите доступ — нажми /start и следуйте инструкциям."
+            )
+            return
 
     await message.answer("🧠 Думаю...")
     answer = await ai_service.generate_response(user_id, text)

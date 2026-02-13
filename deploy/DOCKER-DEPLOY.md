@@ -39,7 +39,11 @@ scp .env root@194.87.103.157:/opt/tg_hub/
 ```
 BOT_TOKEN=...
 WEBAPP_HUB_URL=https://твой-домен.duckdns.org/hub/
-OPENROUTER_API_KEY=...
+# ИИ — один из вариантов:
+# OPENROUTER_API_KEY=...
+# или Yandex GPT:
+# YANDEX_API_KEY=секретный_ключ_из_консоли
+# YANDEX_FOLDER_ID=идентификатор_каталога
 AI_MODEL=auto
 ```
 

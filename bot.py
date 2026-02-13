@@ -17,6 +17,7 @@ from config import BOT_TOKEN, WEBAPP_HUB_URL
 from storage.bootstrap import get_tasks_repo
 from services.ai_service import create_ai_service
 from services.scheduler_service import create_scheduler_service
+from tg_hub_bot.handlers.payment import register_payment_handlers
 from tg_hub_bot.handlers.start import register_start_handler
 from tg_hub_bot.handlers.ai_chat import register_ai_chat_handler
 from tg_hub_bot.services.reminders import RemindersService
@@ -38,7 +39,8 @@ ai_service = create_ai_service()
 scheduler_service = create_scheduler_service(reminders_service)
 
 # ——— Регистрация хендлеров ———
-register_start_handler(dp, WEBAPP_HUB_URL)
+register_start_handler(dp, bot, WEBAPP_HUB_URL)
+register_payment_handlers(dp, bot, WEBAPP_HUB_URL)
 register_ai_chat_handler(dp, ai_service)
 
 

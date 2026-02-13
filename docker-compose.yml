@@ -10,6 +10,8 @@ services:
       - BOT_TOKEN=${BOT_TOKEN}
       - WEBAPP_HUB_URL=${WEBAPP_HUB_URL}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - YANDEX_API_KEY=${YANDEX_API_KEY}
+      - YANDEX_FOLDER_ID=${YANDEX_FOLDER_ID}
       - AI_MODEL=${AI_MODEL:-auto}
     restart: unless-stopped
 
@@ -25,6 +27,8 @@ services:
       - WEBAPP_HUB_URL=${WEBAPP_HUB_URL}
       - API_BASE_URL=http://api:8000
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - YANDEX_API_KEY=${YANDEX_API_KEY}
+      - YANDEX_FOLDER_ID=${YANDEX_FOLDER_ID}
       - AI_MODEL=${AI_MODEL:-auto}
     restart: unless-stopped
 

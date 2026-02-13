@@ -10,12 +10,18 @@ alwaysApply: true
 **На ПК (PowerShell):**
 ```powershell
 cd c:\dev\tg_hub
-scp ... (конкретные файлы)
+scp путь\к\файлу root@194.87.103.157:/opt/tg_hub/путь/
 ```
 
-**На сервере (после ssh):**
+Путь на сервере: `/opt/tg_hub` (Docker) или `/opt/tg-hub` (systemd). Юзер: `root`.
+
+**На сервере — Docker:**
 ```bash
-systemctl restart tg-hub-api
+cd /opt/tg_hub && docker compose restart bot
+```
+
+**На сервере — systemd:**
+```bash
 systemctl restart tg-hub-bot
 ```
 

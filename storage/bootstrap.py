@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from storage.database import AiosqliteDatabaseProvider, DatabaseProvider
+from tg_hub_bot.repositories.paid_users import PaidUsersRepository, SqlitePaidUsersRepository
 from tg_hub_bot.repositories.tasks import SqliteTaskRepository, TaskRepository
 
 DATABASE = Path("data/hub.db")
@@ -27,3 +28,8 @@ def get_database_provider() -> DatabaseProvider:
 def get_tasks_repo() -> TaskRepository:
     """Возвращает репозиторий задач для напоминаний."""
     return SqliteTaskRepository(get_database_provider())
+
+
+def get_paid_repo() -> PaidUsersRepository:
+    """Возвращает репозиторий оплативших пользователей."""
+    return SqlitePaidUsersRepository(get_database_provider())
